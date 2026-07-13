@@ -58,6 +58,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "types-psutil>=7",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -92,13 +93,18 @@ select = [
     "PTH",  # flake8-use-pathlib
     "RUF",  # ruff-specific
     "ASYNC",# flake8-async
+    # * flake8-bandit: source-level security gate (AE2 lint stage; replaces standalone bandit).
+    "S",
 ]
 ignore = [
     "N818", # exception names need not end in "Error" (RutherfordError already does)
+    # * Asserts are the test vocabulary; non-crypto random is common in fixtures/ids.
+    "S101",
+    "S311",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["B011"]
+"tests/**/*.py" = ["B011", "S"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["rutherford"]
@@ -139,7 +145,11 @@ warn_required_dynamic_aliases = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not integration' --cov=rutherford --cov-report=term-missing --cov-fail-under=90"
+# * `-n logical`: pytest-xdist workers (one process per logical CPU). Override with `-n0` for serial
+#   debugging or real-agent integration runs that must not share the machine's agent sessions.
+# * `--dist loadgroup`: honor `@pytest.mark.xdist_group` so timing-sensitive budget tests serialize
+#   on one worker instead of racing each other under spawn contention.
+addopts = "-n logical --dist loadgroup -m 'not integration' --cov=rutherford --cov-report=term-missing --cov-fail-under=90"
 markers = [
     "integration: real-CLI tests, local only, skipped by default (run with -m integration)",
 ]
@@ -147,6 +157,7 @@ markers = [
 [tool.coverage.run]
 source = ["rutherford"]
 branch = true
+parallel = true
 omit = ["*/__main__.py"]
 
 [tool.coverage.report]

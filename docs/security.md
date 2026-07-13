@@ -114,7 +114,7 @@ The execution root is chosen by what `working_dir` is:
   directory as they write the produced files; `propose` applies nothing, so the path stays absent. This is
   a first-class "write / produce things that are not in a git repo" path.
 
-Guards on the apply-back (each with a test in `tests/test_sandbox.py`):
+Guards on the apply-back (each with a test in `tests/acp/test_sandbox.py`):
 
 - **Path containment.** A changed file is written only if `working_dir/<rel>` resolves *inside* the
   resolved `working_dir`; a destination symlink is replaced at its own location, never written *through*

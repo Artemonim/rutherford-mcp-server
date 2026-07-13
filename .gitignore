@@ -24,6 +24,12 @@ coverage.xml
 htmlcov/
 *,cover
 
+# Local AE2 CI / agent navigation caches (never commit)
+.ci_cache/
+.enforcer/
+.codebase-memory/
+.temporary/
+
 # Local research receipts (kept out of commits)
 .research/
 

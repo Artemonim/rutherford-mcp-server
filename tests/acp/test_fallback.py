@@ -11,7 +11,6 @@ genuine spawn-fail SAFE failure into a working fallback, to prove the wiring end
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -32,11 +31,10 @@ from rutherford.domain.models import (
 )
 from rutherford.services.consensus import ConsensusService
 from rutherford.services.delegation import DelegationService
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py")))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
 BAD = AgentDescriptor("bad", "Bad", ("this-binary-does-not-exist-xyz123",))
-
 
 # --- A controllable run_acp_turn stub ----------------------------------------
 

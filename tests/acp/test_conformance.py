@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,9 +20,9 @@ from rutherford.domain.models import DelegationResult, ErrorInfo, Target
 from rutherford.io.serialize import decode
 from rutherford.tools import capabilities as capabilities_module
 from rutherford.tools.capabilities import _LOCAL_PROBE_TIMEOUT_S, _probe_timeout, doctor_tool
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py")))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
 DEAD = AgentDescriptor("dead", "Dead", (sys.executable, "-c", "import sys; sys.exit(0)"))
 BAD = AgentDescriptor("bad", "Bad", ("this-binary-does-not-exist-xyz123",))
 OLLAMA = AgentDescriptor("local", "Local", ("local-acp",), provider="ollama")

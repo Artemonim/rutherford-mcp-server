@@ -6,12 +6,13 @@ local-only: the agents and their logins are not present in CI, so these tests ar
 and deselected by default.
 
 ```sh
-uv run pytest -m integration      # or: just test-integration
+uv run pytest -n0 -m integration      # or: just test-integration
 ```
 
 A plain `uv run pytest` (or `just test`) runs the unit suite only; the `integration` marker is
 deselected by default. The unit suite never spawns a real agent — it uses the fake ACP agent in
-`tests/fake_acp_agent.py`.
+`tests/fake_acp_agent.py`. Unit runs use pytest-xdist (`-n logical` in `addopts`); prefer `-n0` for
+real-agent integration so concurrent workers do not fight over the same CLI sessions.
 
 ## How it runs
 

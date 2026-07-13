@@ -24,9 +24,9 @@ from rutherford.services.consensus import ConsensusService
 from rutherford.services.debate import DebateService
 from rutherford.services.delegation import DelegationService
 from rutherford.services.persistence import PanelVoice, render_panel_voice_files, write_panel_record
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD, default_model="m1")
 FAKE_B = AgentDescriptor("fake_b", "Fake B", _FAKE_CMD, provider="beta", default_model="m2")
 # An agent that exits before the handshake, so its voice always fails (a skipped/failed child).

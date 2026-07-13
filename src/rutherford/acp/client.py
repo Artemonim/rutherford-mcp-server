@@ -160,7 +160,7 @@ class TerminalBroker:
         for var in env or []:
             child_env[var.name] = var.value
         try:
-            process = subprocess.Popen(  # noqa: ASYNC220 - long-lived process drained off-thread, not awaited
+            process = subprocess.Popen(  # noqa: ASYNC220,S603 - long-lived process drained off-thread, not awaited
                 argv,
                 cwd=str(self._root),
                 env=child_env,

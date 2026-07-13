@@ -211,8 +211,8 @@ def _str_tuple(value: object) -> tuple[str, ...]:
 
 def _fetch_url(url: str, timeout_s: float) -> bytes:
     """GET ``url`` with a real User-Agent and return the body bytes (raises on failure)."""
-    request = Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+    request = Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
         body: bytes = response.read()
     return body
 

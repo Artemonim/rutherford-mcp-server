@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -18,9 +17,9 @@ from rutherford.domain.enums import ReexecutionSafety, SafetyMode
 from rutherford.domain.error_codes import ErrorCode
 from rutherford.domain.models import DelegationRequest, DelegationResult, Target
 from rutherford.services.delegation import DelegationService
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py")))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
 _READ_ONLY = PermissionPolicy(SafetyMode.READ_ONLY)
 
 
@@ -253,7 +252,6 @@ def test_model_config_option_matches_by_category_and_keeps_only_string_values() 
 
 
 # --- Bedrock/Vertex model-env normalization (host_env.claude_bedrock_env) ------
-
 
 _CLAUDE_SEAT = AgentDescriptor(
     "claude_code", "Claude Code", FAKE.command, provider="anthropic", underlying_cli="claude"

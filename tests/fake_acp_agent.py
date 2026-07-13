@@ -33,11 +33,18 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
-from acp import PROTOCOL_VERSION, RequestError, run_agent
-from acp.helpers import update_agent_message_text, update_agent_thought_text
-from acp.schema import (
+# * Script-path launch prepends ``tests/`` to ``sys.path``; pop it so ``import acp`` hits the SDK,
+# ! not the ``tests.acp`` unit-test package that would otherwise shadow it.
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if sys.path and sys.path[0] == _TESTS_DIR:
+    sys.path.pop(0)
+
+from acp.helpers import update_agent_message_text, update_agent_thought_text  # noqa: E402
+from acp.schema import (  # noqa: E402
     AgentCapabilities,
     InitializeResponse,
     LoadSessionResponse,
@@ -50,6 +57,8 @@ from acp.schema import (
     SessionModelState,
     SetSessionConfigOptionResponse,
 )
+
+from acp import PROTOCOL_VERSION, RequestError, run_agent  # noqa: E402
 
 
 def _block_text(block: Any) -> str:
@@ -104,7 +113,7 @@ def _sleep_seconds(text: str) -> float | None:
         try:
             return float(env)
         except ValueError:
-            return 30.0
+            return 5.0
     marker = "SLEEP"
     start = text.find(marker)
     if start == -1:
@@ -115,8 +124,10 @@ def _sleep_seconds(text: str) -> float | None:
         try:
             return float(token.strip().split()[0])
         except (ValueError, IndexError):
-            return 30.0
-    return 30.0
+            return 5.0
+    # * Default hang for bare ``SLEEP`` / ``HANG`` peers: long enough for a 1s turn timeout to win,
+    #   short enough that a missed cancel does not park a worker for half a minute.
+    return 5.0
 
 
 def _write_request(text: str) -> tuple[str, str] | None:
@@ -322,7 +333,7 @@ class FakeAgent:
             # the remediation hint).
             raise RequestError(-32603, "API Error (claude-opus-4-8): 400 The provided model identifier is invalid.")
         if "HANG" in text:
-            await asyncio.sleep(30)
+            await asyncio.sleep(5)
         if "REFUSE" in text:
             return PromptResponse(stop_reason="refusal")
         if "EMPTY" in text:

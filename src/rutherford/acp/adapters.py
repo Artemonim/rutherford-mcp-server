@@ -118,7 +118,9 @@ def _run_npm(cmd: tuple[str, ...]) -> tuple[bool, str]:
     # launch path the agent spawns use, so it cannot inject a shell or an arbitrary command.
     argv = prepare_argv(cmd)
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=_INSTALL_TIMEOUT_S)
+        completed = subprocess.run(  # noqa: S603
+            argv, capture_output=True, text=True, check=False, timeout=_INSTALL_TIMEOUT_S
+        )
     except (OSError, subprocess.SubprocessError) as exc:  # npm vanished mid-call, or the install timed out
         return False, f"npm install failed: {exc}"
     if completed.returncode == 0:

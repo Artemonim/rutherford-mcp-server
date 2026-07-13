@@ -51,9 +51,9 @@ from rutherford.services.consensus import ConsensusService
 from rutherford.services.debate import DebateService
 from rutherford.services.delegation import ActivityCallback, DelegationService, PanelLifecycle
 from rutherford.services.jobs import JobStore
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
 _READ_ONLY = PermissionPolicy(SafetyMode.READ_ONLY)
 _TERMINALS = (ActivityEventKind.JOB_CANCELLED, ActivityEventKind.PANEL_FINISHED)
@@ -242,7 +242,7 @@ async def test_broker_shutdown_kills_a_live_terminal() -> None:
     # orphaned in the sandbox. Test 2 pins that the call lands in the right order; this pins that the call
     # actually tears a LIVE process down (the reap primitive itself is covered by test_teardown.py).
     broker = TerminalBroker(REPO_ROOT)
-    term_id = await broker.create(sys.executable, ["-c", "import time; time.sleep(30)"], None)
+    term_id = await broker.create(sys.executable, ["-c", "import time; time.sleep(5)"], None)
     process = broker._terminals[term_id].process
     try:
         assert process.poll() is None  # the command is genuinely running before shutdown
@@ -358,8 +358,9 @@ async def test_sandboxed_open_cancel_cleans_up_the_stranded_sandbox(monkeypatch:
 
     def slow_open(cwd: str) -> _SpySandbox:
         entered.set()  # signal the open thread is in flight
-        time.sleep(1.0)  # block so the cancel lands DURING the shielded open (the open runs off-thread, so the
-        return _SpySandbox()  # shielded await cannot resolve while this sleeps -- the cancel is guaranteed mid-open)
+        # * Brief block so cancel lands mid-open; open runs off-thread so the shielded await stays pending.
+        time.sleep(0.25)
+        return _SpySandbox()
 
     monkeypatch.setattr(service._sandbox, "open", slow_open)
     request = DelegationRequest(

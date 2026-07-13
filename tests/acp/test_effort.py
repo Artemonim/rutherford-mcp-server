@@ -4,9 +4,6 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 from rutherford.acp.descriptors import AgentDescriptor, DescriptorRegistry
@@ -16,9 +13,8 @@ from rutherford.config.schema import AgentConfig, RutherfordConfig
 from rutherford.domain.enums import Effort
 from rutherford.domain.models import DelegationRequest, Target
 from rutherford.services.delegation import DelegationService
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
 
 def _descriptor(agent_id: str, *, model: str | None = None) -> AgentDescriptor:

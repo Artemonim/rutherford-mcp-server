@@ -17,11 +17,12 @@ import psutil
 from rutherford.acp.teardown import reap, snapshot_descendants
 
 # A parent that spawns a long-sleeping child, prints the child's pid, then sleeps itself.
+# * Sleeps are only upper bounds -- reap() kills the tree before they finish; keep them short.
 _PARENT_WITH_CHILD = (
     "import subprocess, sys, time; "
-    "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+    "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)']); "
     "print(c.pid, flush=True); "
-    "time.sleep(60)"
+    "time.sleep(10)"
 )
 
 
@@ -35,7 +36,7 @@ def test_reap_empty_is_a_noop() -> None:
 
 
 async def test_reap_terminates_a_process() -> None:
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)")
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(10)")
     handle = psutil.Process(proc.pid)
     assert handle.is_running()
     await asyncio.to_thread(reap, [handle])
@@ -56,7 +57,7 @@ async def test_snapshot_and_reap_kills_the_whole_tree() -> None:
             descendants = await asyncio.to_thread(snapshot_descendants, proc.pid)
             if any(d.pid == child_pid for d in descendants):
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.02)
         assert any(d.pid == child_pid for d in descendants), "child was never seen in the descendant walk"
 
         await asyncio.to_thread(reap, [psutil.Process(proc.pid), *descendants])

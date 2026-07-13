@@ -1,5 +1,5 @@
 # Rutherford task runner. Run `just` to list tasks.
-# Mirrors the commands documented in CLAUDE.md and CONTRIBUTING.md.
+# Mirrors CONTRIBUTING.md / AGENTS.md. Prefer ./run.ps1 for the AE2 local CI gate.
 
 # Show available tasks.
 default:
@@ -40,7 +40,7 @@ coverage-per-file:
 
 # Run the local-only integration suite (real CLIs; FAILS if zero CLIs are opted in).
 test-integration:
-    uv run pytest -m integration
+    uv run pytest -n0 -m integration
 
 # The full pre-push gate: lint, format check, license header, type check, unit tests,
 # the per-file coverage floor, and the entrypoint smoke check.

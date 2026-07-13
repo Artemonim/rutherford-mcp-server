@@ -1,5 +1,7 @@
 <!-- mcp-name: io.github.chapmanjw/rutherford -->
 
+> **Fork note (Artemonim):** local Agent Enforcer 2 CI lives in `run.ps1` — see [`docs/ci.md`](docs/ci.md) and [`AGENTS.md`](AGENTS.md). Work on `dev`; `main` tracks upstream.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/chapmanjw/rutherford-mcp-server/main/docs/images/logo.png" width="180" alt="Rutherford logo">
 </p>

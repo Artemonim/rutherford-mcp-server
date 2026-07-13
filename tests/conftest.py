@@ -85,6 +85,6 @@ def drain_async_job() -> DrainAsyncJob:
                 return record
             if asyncio.get_running_loop().time() >= deadline:  # pragma: no cover - a fast fake never waits this long
                 raise AssertionError(f"async job {job_id} did not finish within {timeout_s:.0f}s")
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
 
     return _drain

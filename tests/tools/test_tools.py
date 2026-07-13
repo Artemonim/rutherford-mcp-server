@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +21,10 @@ from rutherford.io.serialize import decode
 from rutherford.tools.capabilities import capabilities_tool
 from rutherford.tools.common import ensure_known_agent, parse_safety_mode, resolve_safety_mode
 from rutherford.tools.delegate import delegate_tool
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE_SCRIPT = str(Path(__file__).resolve().parent / "fake_acp_agent.py")
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, FAKE_SCRIPT))
-FAKE2 = AgentDescriptor("fake2", "Fake Two", (sys.executable, FAKE_SCRIPT))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
+FAKE2 = AgentDescriptor("fake2", "Fake Two", FAKE_ACP_CMD)
 
 
 def _app() -> AppContext:

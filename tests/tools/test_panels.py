@@ -11,7 +11,6 @@ request via the tool layer (driving the fake ACP agent end to end).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +28,9 @@ from rutherford.io.serialize import decode, encode
 from rutherford.tools.consensus import consensus_tool
 from rutherford.tools.debate import debate_tool
 from rutherford.tools.panels import panel_for_call, reload_panels_tool
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
 FAKE_A = AgentDescriptor("fake_a", "Fake A", _FAKE_CMD, provider="alpha", default_model="model-a")
 FAKE_B = AgentDescriptor("fake_b", "Fake B", _FAKE_CMD, provider="beta", default_model="model-b")

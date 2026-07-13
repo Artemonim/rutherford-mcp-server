@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,18 +27,18 @@ from rutherford.services.debate import (
 )
 from rutherford.services.delegation import DelegationService
 from rutherford.tools.debate import debate_tool
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
 DEAD = AgentDescriptor("dead", "Dead", (sys.executable, "-c", "import sys; sys.exit(0)"))
-# A slow agent: streams a partial then sleeps 1.5s, so a tight round deadline cuts its turn mid-round. The
-# sleep is kept small on purpose: round-boundary budget cuts work at asyncio resolution, so the slow voice
-# only needs to outlast the ~1.2s cut budget by a clear margin (it finishes near subprocess-spawn + 1.5s).
-# The budgets below sit near a second rather than truly sub-second because of a ~0.7s subprocess-spawn floor
-# per voice: a budget under that floor would cut the FAST voice too, starving the round.
+# * Cut-budget window for the slow-voice tests. Quiet spawn is ~0.7s; under pytest-xdist contention it
+#   rises, so the budget must still clear a FAST voice while the slow sleep outlasts the cut.
+_CUT_BUDGET_S = 2.5
+_SLOW_SLEEP_S = "3.5"
+# A slow agent: streams a partial then sleeps, so a tight round deadline cuts its turn mid-round.
 SLOW = AgentDescriptor(
-    "slow", "Slow", _FAKE_CMD, default_model="model-s", env_overrides=(("RUTHERFORD_FAKE_SLEEP", "1.5"),)
+    "slow", "Slow", _FAKE_CMD, default_model="model-s", env_overrides=(("RUTHERFORD_FAKE_SLEEP", _SLOW_SLEEP_S),)
 )
 # A fast fake with a distinct id, so a debate of two ``fake`` voices can name it as a NON-participant judge.
 JUDGE = AgentDescriptor("judge", "Judge", _FAKE_CMD, provider="beta", default_model="model-j")
@@ -361,6 +360,7 @@ async def test_debate_tool_and_server_wrapper(monkeypatch: Any) -> None:
 # --- time budget at round boundaries (F8a) -----------------------------------
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_budget_cuts_a_round_and_finalizes() -> None:
     # A slow voice keeps round 1 in flight past the deadline: the fast voice's answer is kept, the slow turn
     # is a BUDGET_EXHAUSTED contribution (its partial preserved, not promoted), and the debate finalizes early.
@@ -369,7 +369,7 @@ async def test_debate_budget_cuts_a_round_and_finalizes() -> None:
         prompt="what is 17 + 25?",
         rounds=3,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
     )
     result = await _service().debate(request)
     assert result.stop_reason == "budget" and len(result.rounds) == 1  # cut at the round-1 deadline
@@ -384,6 +384,7 @@ async def test_debate_budget_cuts_a_round_and_finalizes() -> None:
     assert result.rollup.stop_reason == "budget" and result.rollup.cut == 1 and result.rollup.usable == 1
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_budget_below_quorum_raises_budget_exhausted() -> None:
     # Both voices slow: every round-1 turn is cut, leaving zero usable positions -> BUDGET_EXHAUSTED.
     request = DebateRequest(
@@ -391,7 +392,7 @@ async def test_debate_budget_below_quorum_raises_budget_exhausted() -> None:
         prompt="x",
         rounds=2,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
     )
     with pytest.raises(RutherfordError) as exc:
         await _service().debate(request)
@@ -416,6 +417,7 @@ async def test_debate_no_budget_leaves_stop_reason_and_rollup_unset() -> None:
     assert result.stop_reason is None and result.rollup is None
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_on_budget_continue_runs_every_round() -> None:
     # on_budget="continue" makes the budget advisory: even a slow voice runs to completion, no cut.
     request = DebateRequest(
@@ -423,7 +425,7 @@ async def test_debate_on_budget_continue_runs_every_round() -> None:
         prompt="what is 17 + 25?",
         rounds=1,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
         on_budget="continue",
     )
     result = await _service().debate(request)
@@ -457,19 +459,21 @@ async def test_debate_applies_per_seat_effort_to_each_voice() -> None:
     assert {c.text.strip() for c in contributions} == {"effort=high", "effort=xhigh"}
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_budget_rollup_records_effort_requested() -> None:
     request = DebateRequest(
         targets=[Target(cli="fake"), Target(cli="slow")],
         prompt="what is 17 + 25?",
         rounds=2,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
         effort=Effort.MEDIUM,
     )
     result = await _service().debate(request)
     assert result.rollup is not None and result.rollup.effort_requested is Effort.MEDIUM
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_cut_turn_with_no_stream_has_no_partial() -> None:
     # A HANG voice streams nothing before the deadline, so its cut contribution has partial=None (an honest
     # empty harvest) while the fast voice's answer is still kept.
@@ -478,7 +482,7 @@ async def test_debate_cut_turn_with_no_stream_has_no_partial() -> None:
         prompt="what is 17 + 25?\nHANG",  # both voices receive HANG (the shared prompt) -> both cut
         rounds=1,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
     )
     config = RutherfordConfig(min_quorum=1)
     # both cut with no usable position -> below quorum -> BUDGET_EXHAUSTED
@@ -638,13 +642,14 @@ async def test_debate_quorum_lost_is_recorded_in_the_outcome() -> None:
     assert result.outcome is not None and result.outcome.termination is TerminationReason.QUORUM_LOST
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_debate_budget_termination_is_recorded_in_the_outcome() -> None:
     request = DebateRequest(
         targets=[Target(cli="fake"), Target(cli="slow")],
         prompt="what is 17 + 25?",
         rounds=3,
         working_dir=str(REPO_ROOT),
-        time_budget_s=1.2,
+        time_budget_s=_CUT_BUDGET_S,
     )
     result = await _service().debate(request)
     assert result.outcome is not None and result.outcome.termination is TerminationReason.BUDGET

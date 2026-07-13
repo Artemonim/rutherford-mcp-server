@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,9 +31,9 @@ from rutherford.tools.jobs import (
     make_summary,
     submit_job,
 )
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py")))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
 
 
 def _app(config: RutherfordConfig | None = None) -> AppContext:
@@ -152,7 +150,7 @@ async def test_cancel_long_running_job() -> None:
 
     async def long_work(_on_activity: ActivityCallback | None = None) -> str:
         started.set()
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
         return "never"
 
     job_id = await store.submit("delegate", long_work, summary="x")
@@ -488,9 +486,9 @@ async def test_activity_sorted_longest_running_first() -> None:
         return "done"
 
     first = await app.jobs.submit("delegate", in_flight, summary="first")
-    await asyncio.sleep(0.05)  # the first job accrues more elapsed than the second
+    await asyncio.sleep(0.02)  # first job accrues a measurable elapsed edge over the second
     second = await app.jobs.submit("consensus", in_flight, summary="second")
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0.01)
 
     snapshot = decode(await activity_tool(app))
     order = [row["job_id"] for row in snapshot["active"]]

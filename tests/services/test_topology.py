@@ -12,9 +12,7 @@ increasing fraction; the ``max_concurrency`` semaphore actually serializing a wi
 from __future__ import annotations
 
 import asyncio
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
@@ -35,9 +33,9 @@ from rutherford.runtime.depth import ENV_DEPTH
 from rutherford.services.consensus import ConsensusService
 from rutherford.services.debate import DebateService
 from rutherford.services.delegation import DelegationService
+from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
+from tests.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_FAKE_CMD = (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py"))
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
 FAKE_A = AgentDescriptor("fake_a", "Fake A", _FAKE_CMD, provider="alpha", default_model="model-a")
 FAKE_B = AgentDescriptor("fake_b", "Fake B", _FAKE_CMD, provider="beta", default_model="model-b")
@@ -171,6 +169,7 @@ async def _slow_panel_elapsed(max_concurrency: int) -> tuple[float, ConsensusRes
     return time.monotonic() - start, result
 
 
+@pytest.mark.xdist_group("acp_budget_timing")
 async def test_semaphore_serializes_a_wide_panel() -> None:
     """With max_concurrency=1, two slow voices run SERIALLY -- the serial run is ~one extra voice-sleep longer
     than the parallel control, which proves the semaphore bounded concurrency to one.
@@ -291,7 +290,7 @@ async def test_progress_callback_fires_with_increasing_fraction() -> None:
         working_dir=str(REPO_ROOT),
     )
     await _consensus().consensus(request, on_activity=push)
-    await asyncio.sleep(0.05)  # the pushes are fire-and-forget tasks; let them drain
+    await asyncio.sleep(0.01)  # the pushes are fire-and-forget tasks; let them drain
     assert fractions, "the progress callback never fired"
     # The total is the declared width (2) once the panel started; the done count climbs to it monotonically.
     totals = {total for _done, total in fractions if total is not None}

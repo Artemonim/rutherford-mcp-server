@@ -1,0 +1,28 @@
+#!/bin/sh
+# * Run the repository-local CI freshness guard before creating a commit.
+
+HOOK_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+REPO_ROOT=$(git -C "$HOOK_DIR/.." rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$HOOK_DIR/..")
+
+if command -v cygpath >/dev/null 2>&1; then
+  REPO_ROOT_WIN=$(cygpath -m "$REPO_ROOT")
+else
+  REPO_ROOT_WIN="$REPO_ROOT"
+fi
+
+if [ -x "$REPO_ROOT/.venv/Scripts/python.exe" ]; then
+  PYTHON_BIN="$REPO_ROOT/.venv/Scripts/python.exe"
+  exec "$PYTHON_BIN" "$REPO_ROOT_WIN/scripts/pre_commit_ci_guard.py" --repo-root "$REPO_ROOT_WIN"
+fi
+
+if command -v python >/dev/null 2>&1; then
+  exec python "$REPO_ROOT_WIN/scripts/pre_commit_ci_guard.py" --repo-root "$REPO_ROOT_WIN"
+fi
+
+if command -v py >/dev/null 2>&1; then
+  exec py -3 "$REPO_ROOT_WIN/scripts/pre_commit_ci_guard.py" --repo-root "$REPO_ROOT_WIN"
+fi
+
+echo "Commit заблокирован: не найден Python для запуска CI guard." >&2
+echo "Установите Python или создайте .venv, затем повторите commit." >&2
+exit 1

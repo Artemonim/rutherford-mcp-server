@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -19,9 +18,9 @@ from rutherford.services.roles import RoleStore, _parse_frontmatter, _role_from_
 from rutherford.tools.common import apply_role
 from rutherford.tools.delegate import delegate_tool
 from rutherford.tools.roles import list_roles_tool
+from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE = AgentDescriptor("fake", "Fake", (sys.executable, str(Path(__file__).resolve().parent / "fake_acp_agent.py")))
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
 
 #: The five built-in role ids shipped under src/rutherford/roles/.
 BUILTIN_IDS = {"principal-reviewer", "architect", "debugger", "security-reviewer", "explainer"}
