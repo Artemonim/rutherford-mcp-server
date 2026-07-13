@@ -72,7 +72,7 @@ domain + config            domain/, config/, io/   models, enums, errors, config
 
 ## Known issues
 
-- **Cursor ACP model routing:** some Cursor/ACP paths expect model changes via `set_config_option`, while others use `set_model`. If model selection looks ignored or wrong, check both contracts in ACP session setup — a known routing edge case, not a broken Rutherford core by itself.
+- **Cursor ACP model routing:** Cursor inference follows the launch `--model` flag (`model_launch_flag` on the descriptor), not in-session `set_config_option` / `set_model` (those can echo `currentValue` without changing runtime). Envelope `provenance.confirmed` stays false for launch selection — ACP does not attest the runtime model.
 
 ## Documentation Map
 
