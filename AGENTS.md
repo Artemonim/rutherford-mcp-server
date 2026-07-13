@@ -72,7 +72,8 @@ domain + config            domain/, config/, io/   models, enums, errors, config
 
 ## Known issues
 
-- **Cursor ACP model routing:** Cursor inference follows the launch `--model` flag (`model_launch_flag` on the descriptor), not in-session `set_config_option` / `set_model` (those can echo `currentValue` without changing runtime). Envelope `provenance.confirmed` stays false for launch selection — ACP does not attest the runtime model.
+- **Cursor ACP model routing:** Cursor inference follows the launch `--model` flag (`model_launch_flag` on the descriptor), not in-session `set_config_option` / `set_model` (those can echo `currentValue` without changing runtime). Envelope `provenance.confirmed` stays false for launch selection — ACP does not attest the runtime model. Launch advertisement validation accepts compound ids that differ only in a boolean `fast=` value (exact `--model` argv is preserved). Live Cursor/entitlement may still write a `*-fast` runtime slug in `store.db`; family routing is the reliable check, not a non-fast runtime assertion.
+- **ACP SDK model channels:** `agent-client-protocol` 0.10.x exposes unstable `session.models` + `set_session_model`; 0.11+ removes both and keeps stable `config_options`. Rutherford treats the legacy channel as optional (defensive access + capability-gated `set_session_model`) so a config-only SDK does not INTERNAL on open.
 
 ## Documentation Map
 
