@@ -25,7 +25,14 @@ from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
 from tests.paths import REPO_ROOT
 
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
-FAKE_A = AgentDescriptor("fake_a", "Fake A", _FAKE_CMD, provider="alpha", default_model="model-a")
+FAKE_A = AgentDescriptor(
+    "fake_a",
+    "Fake A",
+    _FAKE_CMD,
+    provider="alpha",
+    default_model="model-a",
+    env_overrides=(("RUTHERFORD_FAKE_MODELS", "model-a"),),
+)
 
 #: A tiny three-line patch, the unit a live review acts on.
 _DIFF = """--- a/calc.py

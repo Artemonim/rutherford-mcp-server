@@ -28,16 +28,31 @@ from tests.paths import FAKE_ACP_CMD as _FAKE_CMD
 from tests.paths import REPO_ROOT
 
 _DrainJob = Callable[[JobStore, str], Awaitable[JobRecord]]
-FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
+FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD, env_overrides=(("RUTHERFORD_FAKE_MODELS", "m"),))
 # Two more fakes with distinct provider + default model, so a panel of them spans real diversity.
-FAKE_A = AgentDescriptor("fake_a", "Fake A", _FAKE_CMD, provider="alpha", default_model="model-a")
-FAKE_B = AgentDescriptor("fake_b", "Fake B", _FAKE_CMD, provider="beta", default_model="model-b")
+FAKE_A = AgentDescriptor(
+    "fake_a",
+    "Fake A",
+    _FAKE_CMD,
+    provider="alpha",
+    default_model="model-a",
+    env_overrides=(("RUTHERFORD_FAKE_MODELS", "model-a"),),
+)
+FAKE_B = AgentDescriptor(
+    "fake_b",
+    "Fake B",
+    _FAKE_CMD,
+    provider="beta",
+    default_model="model-b",
+    env_overrides=(("RUTHERFORD_FAKE_MODELS", "model-b"),),
+)
 # An agent that exits before the handshake, so its voice always fails.
 DEAD = AgentDescriptor("dead", "Dead", (sys.executable, "-c", "import sys; sys.exit(0)"))
 # * Cut-budget window for the slow-voice tests. Quiet spawn is ~0.7s; under pytest-xdist contention it
-#   rises, so the budget must still clear a FAST voice while the slow sleep outlasts the cut.
-_CUT_BUDGET_S = 2.5
-_SLOW_SLEEP_S = "3.5"
+#   rises further (ACP handshake + optional set_model), so the budget must still clear a FAST voice while
+#   the slow sleep outlasts the cut.
+_CUT_BUDGET_S = 4.0
+_SLOW_SLEEP_S = "5.5"
 # A slow agent: streams a partial then sleeps, so a tight panel deadline cuts it mid-turn. Slowness rides
 # the descriptor env, not the prompt, so a panel can mix a fast voice and a slow one on one prompt.
 SLOW = AgentDescriptor(

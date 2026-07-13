@@ -33,7 +33,7 @@ from rutherford.tools.jobs import (
 )
 from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
-FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
+FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD, env_overrides=(("RUTHERFORD_FAKE_MODELS", "m"),))
 
 
 def _app(config: RutherfordConfig | None = None) -> AppContext:
@@ -353,7 +353,7 @@ async def test_consensus_tool_async_returns_job() -> None:
         )
     )
     assert submit["tool"] == "consensus"
-    record = await _poll_until_done(app.jobs, submit["job_id"])
+    record = await _poll_until_done(app.jobs, submit["job_id"], timeout_s=30.0)
     assert record.status is JobStatus.SUCCEEDED
     # Match the encoded answer field (`text: "42"`) so the count cannot be inflated by "42" in a duration
     # float; the async envelope is byte-identical to the sync one, so both voices answer here too.

@@ -33,9 +33,10 @@ from tests.paths import REPO_ROOT
 FAKE = AgentDescriptor("fake", "Fake", _FAKE_CMD)
 DEAD = AgentDescriptor("dead", "Dead", (sys.executable, "-c", "import sys; sys.exit(0)"))
 # * Cut-budget window for the slow-voice tests. Quiet spawn is ~0.7s; under pytest-xdist contention it
-#   rises, so the budget must still clear a FAST voice while the slow sleep outlasts the cut.
-_CUT_BUDGET_S = 2.5
-_SLOW_SLEEP_S = "3.5"
+#   rises further (ACP handshake + optional set_model), so the budget must still clear a FAST voice while
+#   the slow sleep outlasts the cut.
+_CUT_BUDGET_S = 4.0
+_SLOW_SLEEP_S = "5.5"
 # A slow agent: streams a partial then sleeps, so a tight round deadline cuts its turn mid-round.
 SLOW = AgentDescriptor(
     "slow", "Slow", _FAKE_CMD, default_model="model-s", env_overrides=(("RUTHERFORD_FAKE_SLEEP", _SLOW_SLEEP_S),)

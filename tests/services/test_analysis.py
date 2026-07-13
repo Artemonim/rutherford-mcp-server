@@ -40,10 +40,18 @@ from tests.paths import REPO_ROOT
 # Fixed-verdict voices with a fixed vendor: each always answers its env verdict, so a persisted strategy
 # panel carries a deterministic per-voice verdict to assert.
 ALPHA_YES = AgentDescriptor(
-    "alpha_yes", "Alpha Yes", _FAKE_CMD, provider="anthropic", env_overrides=(("RUTHERFORD_FAKE_VERDICT", "yes"),)
+    "alpha_yes",
+    "Alpha Yes",
+    _FAKE_CMD,
+    provider="anthropic",
+    env_overrides=(("RUTHERFORD_FAKE_VERDICT", "yes"), ("RUTHERFORD_FAKE_MODELS", "claude-opus-4-8")),
 )
 BETA_NO = AgentDescriptor(
-    "beta_no", "Beta No", _FAKE_CMD, provider="openai", env_overrides=(("RUTHERFORD_FAKE_VERDICT", "no"),)
+    "beta_no",
+    "Beta No",
+    _FAKE_CMD,
+    provider="openai",
+    env_overrides=(("RUTHERFORD_FAKE_VERDICT", "no"), ("RUTHERFORD_FAKE_MODELS", "gpt-5")),
 )
 
 
