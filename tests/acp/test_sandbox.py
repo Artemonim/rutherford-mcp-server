@@ -152,7 +152,7 @@ async def test_write_to_an_absolute_path_outside_the_root_is_rejected(tmp_path: 
         sandbox_root=str(root),
     )
     with pytest.raises(RequestError):
-        await client.write_text_file("pwned", str(outside), "s")
+        await client.write_text_file(session_id="s", path=str(outside), content="pwned")
     assert not outside.exists()
     assert "fs_write_denied" in journal.kinds()
 
@@ -471,10 +471,10 @@ async def test_sandboxed_read_confined_to_root_rejects_escape(tmp_path: Path) ->
         cwd=str(root),
         sandbox_root=str(root),
     )
-    served = await client.read_text_file(str(root / "inside.txt"), "s")
+    served = await client.read_text_file(session_id="s", path=str(root / "inside.txt"))
     assert served.content == "ok\n"
     with pytest.raises(RequestError):
-        await client.read_text_file(str(outside), "s")
+        await client.read_text_file(session_id="s", path=str(outside))
     assert "fs_read_denied" in journal.kinds()
 
 
