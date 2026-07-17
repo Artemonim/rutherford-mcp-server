@@ -23,17 +23,18 @@ from __future__ import annotations
 from ..domain.error_codes import ErrorCode
 
 #: ACP failure codes that suggest the agent *seat* itself is broken (failed to launch, failed the
-#: handshake, hung past its timeout, or dropped its connection mid-turn), so the failure should count
-#: toward the agent's cooldown. Deliberately EXCLUDES the post-prompt "the request was bad / the model
-#: declined" outcomes -- ``ACP_REFUSED`` (a clean refusal) and ``ACP_EMPTY_ANSWER`` (no answer text) -- which
-#: a healthy agent returns on a hard or disallowed prompt; benching a healthy agent on those is the
-#: feature's most likely false positive. The v2 rate-limit / auth classes (``RATE_LIMITED`` / ``AUTH_FAILED``)
-#: are kept in the set so a refinement that maps an in-turn throttle/auth rejection to one of them benches the
-#: seat too, even though ACP does not surface them natively today.
+#: handshake, hung past its pre-prompt or turn timeout, or dropped its connection mid-turn), so the
+#: failure should count toward the agent's cooldown. Deliberately EXCLUDES the post-prompt "the request was
+#: bad / the model declined" outcomes -- ``ACP_REFUSED`` (a clean refusal) and ``ACP_EMPTY_ANSWER`` (no
+#: answer text) -- which a healthy agent returns on a hard or disallowed prompt; benching a healthy agent on
+#: those is the feature's most likely false positive. The v2 rate-limit / auth classes (``RATE_LIMITED`` /
+#: ``AUTH_FAILED``) are kept in the set so a refinement that maps an in-turn throttle/auth rejection to one of
+#: them benches the seat too, even though ACP does not surface them natively today.
 _UNHEALTHY: frozenset[ErrorCode] = frozenset(
     {
         ErrorCode.ACP_SPAWN_FAILED,
         ErrorCode.ACP_HANDSHAKE_FAILED,
+        ErrorCode.ACP_PRE_PROMPT_TIMEOUT,
         ErrorCode.ACP_TURN_TIMEOUT,
         ErrorCode.ACP_TURN_ERROR,
         ErrorCode.RATE_LIMITED,

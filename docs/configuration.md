@@ -57,7 +57,8 @@ order the fields appear in `config/schema.py`.
 | `agents` | `dict[str, AgentConfig]` | `{}` | Agent definitions and overrides keyed by id (see `AgentConfig` below). |
 | `auto_detect_local_models` | `bool` | `true` | Probe a running Ollama (`:11434`) and LM Studio (`:1234`) at startup and register each tool-capable model as a `goose`-based agent. A built-in or explicit `[agents.<id>]` of the same id always wins; a down backend is skipped. |
 | `default_safety_mode` | `string` | `"read_only"` | Safety posture when a call omits `safety_mode`. One of `read_only`, `propose`, `write`, `yolo`. |
-| `default_timeout_s` | `float` | `300.0` | Per-run timeout in seconds (> 0). |
+| `default_timeout_s` | `float` | `300.0` | Per-run prompt timeout in seconds (> 0). Governs only a running `session/prompt`. |
+| `default_pre_prompt_timeout_s` | `float` | `90.0` | Hard deadline for pre-prompt work (> 0): sandbox prep, ACP spawn, initialize, session create/load, and model/effort selection. Ends before the prompt is accepted. Semaphore queue wait does not consume this budget. Distinct from `default_timeout_s`. |
 | `default_effort` | `string` or omitted | none | Default reasoning-effort tier when a call names none (`low` / `medium` / `high` / `xhigh`); `None` lets the agent decide. |
 | `default_time_budget_s` | `float` or omitted | none | Default wall-clock budget for a panel / job; `None` means no budget (runs to completion). |
 | `default_on_budget` | `string` | `"harvest"` | Disposition at a time-budget deadline when a call names none. |
@@ -82,8 +83,9 @@ order the fields appear in `config/schema.py`.
 | `max_jobs` | `int` | `100` | Maximum background jobs retained at once (≥ 1). Past the cap, creating one fails with `TOO_MANY_JOBS`. |
 | `default_persistence` | `string` | `"ephemeral"` | Whether a run is persisted to disk by default (`ephemeral` / `job`). |
 | `jobs_dir` | `string` or omitted | `<cwd>/.rutherford/jobs` | Where durable jobs are written. |
-| `log_level` | `string` | `"info"` | Structured-log verbosity (`debug` / `info` / `warning` / `error`). Logs go to stderr as JSON. |
-| `log_format` | `string` | `"json"` | Structured-log format (`json` / `off`). stdout is the MCP channel and is never written to. |
+| `log_level` | `string` | `"info"` | Structured-log verbosity (`debug` / `info` / `warning` / `error`). Logs go to stderr as JSON for the local process operator. They are not MCP progress and do not wake a `mode="sync"` caller. |
+| `log_format` | `string` | `"json"` | Structured-log format (`json` / `off`). stdout is the MCP channel and is never written to; keep diagnostics on stderr only. |
+| `acp_prompt_heartbeat_s` | `float` | `30.0` | Seconds between ACP prompt heartbeats on stderr (`acp_lifecycle` / `phase=heartbeat`) while Rutherford awaits a prompt outcome (≥ 0; `0` disables). Stage enter/exit still log when `log_format` is `json`. Does not push MCP progress and does not claim model or network liveness. Override with `RUTHERFORD_ACP_PROMPT_HEARTBEAT_S`. |
 
 > Two fields are part of the config contract but are **not yet wired** into the leaner v3 path — they
 > validate and load, but have no effect today, and land as those features are re-added over the ACP core.
@@ -92,7 +94,8 @@ order the fields appear in `config/schema.py`.
 > What **is** active today: the roster fields (`agents`, `enabled_agents`, `auto_detect_local_models`),
 > `default_safety_mode` and `trusted_workspaces` (read_only is the default and the write/yolo trust gate
 > is enforced; `write` / `propose` / `yolo` run in an isolated git-worktree sandbox and `verify_read_only`
-> checks a `read_only` run did not mutate its git tree), `default_timeout_s`, `default_effort`,
+> checks a `read_only` run did not mutate its git tree), `default_timeout_s`, `default_pre_prompt_timeout_s`,
+> `default_effort`,
 > `default_time_budget_s`, `default_on_budget` (time budget / effort), `default_persistence` / `jobs_dir`
 > (F2 durable on-disk jobs — a `persist=true` `delegate` / `consensus` / `debate` writes a `state.json`
 > record plus Markdown artifacts under `jobs_dir`; the in-memory `JobStore` is the separate async-job
@@ -102,7 +105,7 @@ order the fields appear in `config/schema.py`.
 > `synthesize_default` (consensus aggregation / synthesis / diversity), `cooldown_threshold` /
 > `cooldown_window_s` / `cooldown_duration_s` (the F7 cooldown / quarantine — bench a flapping agent out of
 > auto-selection and fallback), `max_debate_rounds`, `role_dirs`, the in-memory job knobs (`job_ttl_s`,
-> `max_jobs`), and the logging fields.
+> `max_jobs`), and the logging fields (`log_level` / `log_format` / `acp_prompt_heartbeat_s`).
 
 ### `AgentConfig` fields (under `[agents.<id>]`)
 
@@ -119,7 +122,8 @@ the Zed/Cline `acp.json` shape.
 | `provider` | `string` or omitted | the built-in's | The fixed model vendor, recorded as provenance. |
 | `default_model` | `string` or omitted | the built-in's | The model used when a call names none. |
 | `handshake_timeout_s` | `float` or omitted | the built-in's (30s for a new agent) | Seconds for the `initialize` + `new_session` handshake (> 0). Raise it for a heavyweight agent. |
-| `timeout_s` | `float` or omitted | the global `default_timeout_s` | Per-agent run timeout (> 0) when a call names no `timeout_s`. |
+| `timeout_s` | `float` or omitted | the global `default_timeout_s` | Per-agent run (prompt) timeout (> 0) when a call names no `timeout_s`. |
+| `pre_prompt_timeout_s` | `float` or omitted | the global `default_pre_prompt_timeout_s` | Per-agent pre-prompt deadline (> 0) when a call names no `pre_prompt_timeout_s`. |
 | `extra_args` | `list[str]` | `[]` | Extra arguments appended to the launch argv. |
 | `effort` | `string` or omitted | the global `default_effort` | Per-agent default reasoning-effort tier; a no-op for an agent with no effort knob. A clone honors it only when it inherits a built-in's launch command via `base` (a raw-`command` clone has no knowable knob — see `base`). |
 | `fallback_model` | `string` or omitted | none | The model to retry with when the requested model is unavailable (F7 model fallback). `None` means this agent exposes no fallback model, so a model-unavailable failure does not retry it on another model. Most ACP agents cannot decline a named model, so this stays unset for them. |
@@ -158,6 +162,8 @@ These override specific fields after the config files are merged. They do not re
 | `RUTHERFORD_MAX_TARGETS` | integer | `max_targets` |
 | `RUTHERFORD_MAX_CONCURRENCY` | integer | `max_concurrency` |
 | `RUTHERFORD_DEFAULT_TIMEOUT_S` | float | `default_timeout_s` |
+| `RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S` | float | `default_pre_prompt_timeout_s` |
+| `RUTHERFORD_ACP_PROMPT_HEARTBEAT_S` | float | `acp_prompt_heartbeat_s` (default 30.0; `0` disables heartbeats) |
 | `RUTHERFORD_DEFAULT_SAFETY` | string | `default_safety_mode` |
 | `RUTHERFORD_TRUSTED_WORKSPACES` | `os.pathsep`-delimited paths | `trusted_workspaces` |
 | `RUTHERFORD_ROLE_DIRS` | `os.pathsep`-delimited paths | `role_dirs` |

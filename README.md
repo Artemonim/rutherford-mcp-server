@@ -202,8 +202,13 @@ read-only.
 | `cancel_job` | Cancel a running background job and tear down its work. |
 
 Shared arguments on `delegate` / `consensus` / `debate`: `working_dir`, `files` (paths to put in
-scope), `safety_mode`, `timeout_s`, `role`, and `mode` (`sync` or `async`). `delegate` also takes
-`trust_workspace` for the mutating modes; `debate` takes `rounds`, `judge`, and `synthesize`.
+scope), `safety_mode`, `timeout_s`, `pre_prompt_timeout_s`, `role`, and `mode` (`sync` or `async`).
+`timeout_s` bounds the running prompt after acceptance; `pre_prompt_timeout_s` is separate and bounds
+sandbox prep when applicable, spawn, initialize, session create/load, and model/effort selection — it
+ends before prompt acceptance; when omitted, it resolves through the per-agent or global
+`default_pre_prompt_timeout_s` (90s); semaphore queue wait does not consume it. `delegate` also takes
+`trust_workspace` for the mutating modes; `debate`
+takes `rounds`, `judge`, and `synthesize`.
 
 ## The agent roster
 
@@ -280,11 +285,14 @@ box); an explicit value always wins. `write` and `yolo` require a trusted worksp
 
 ## Jobs, roles, and config
 
-**Background jobs.** Pass `mode="async"` to `delegate` / `consensus` / `debate` to run the work off
-the request path: the call returns a small `{job_id, status, tool}` envelope immediately, and the work
-runs as an in-memory task. Manage it with `list_jobs`, `activity`, `job_status`, `job_result`, and
-`cancel_job`. A finished job's result envelope is byte-for-byte the same as the sync path's. Jobs are
-in-memory and clear on restart.
+**Background jobs.** `mode="sync"` (default) waits quietly for the final result — startup is bounded by
+`pre_prompt_timeout_s`, then the running prompt by `timeout_s`; missing MCP progress is not a hang.
+Pass `mode="async"` to `delegate` / `consensus` / `debate` when you need visibility or cancellation
+(choose before starting): the call returns a small `{job_id, status, tool}` envelope immediately, and
+the work runs as an in-memory task. Manage it with `list_jobs`, `activity`, `job_status`, `job_result`,
+and `cancel_job`. A finished job's result envelope is byte-for-byte the same as the sync path's. Jobs
+are in-memory and clear on restart. Operator notes:
+[docs/troubleshooting.md](docs/troubleshooting.md#sync-call-looks-hung-no-mcp-progress-for-a-long-time).
 
 **Roles.** A role is a reusable system prompt. Pass `role="<id>"` to `delegate` / `consensus` /
 `debate` and the persona is prepended to your prompt. Five built-ins ship as package data:

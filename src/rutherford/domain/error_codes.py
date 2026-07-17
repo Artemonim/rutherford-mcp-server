@@ -97,6 +97,10 @@ class ErrorCode(StrEnum):
     #: ACP transport: the initialize/new_session handshake failed (protocol, auth, or version). Pre-prompt,
     #: so re-execution-safe.
     ACP_HANDSHAKE_FAILED = "ACP_HANDSHAKE_FAILED"
+    #: ACP transport: the pre-prompt deadline expired before ``session/prompt`` was accepted (sandbox prep,
+    #: spawn, initialize, session create/load, or model/effort selection). Pre-prompt, so re-execution-safe;
+    #: no partial answer. Distinct from :attr:`ACP_TURN_TIMEOUT`, which governs only a running prompt.
+    ACP_PRE_PROMPT_TIMEOUT = "ACP_PRE_PROMPT_TIMEOUT"
     #: An ACP prompt turn exceeded its timeout; its session was cancelled and any streamed partial is
     #: preserved. Post-prompt, so NOT re-execution-safe.
     ACP_TURN_TIMEOUT = "ACP_TURN_TIMEOUT"

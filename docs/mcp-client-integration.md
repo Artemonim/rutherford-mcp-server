@@ -12,6 +12,16 @@ If the command is not on PATH for your client, use an absolute path, or `python 
 interpreter from the environment where Rutherford is installed. The same command works on Windows,
 macOS, and Linux. Python 3.11+ is required.
 
+## Quiet synchronous calls
+
+A synchronous Rutherford tool call can sit quiet for a long time while the ACP agent works. That is
+expected for `mode="sync"`: the MCP request waits for the final envelope through the pre-prompt
+startup budget (`pre_prompt_timeout_s`) and then the running-prompt budget (`timeout_s`). Absent MCP
+progress tokens are not a stall. Choose `mode="async"` **before** you start when you need visibility
+or cancellation without blocking the request (you cannot switch an in-flight sync call to async).
+Then use `activity` / `job_status` / `job_result` / `cancel_job`. Details:
+[troubleshooting.md](troubleshooting.md#sync-call-looks-hung-no-mcp-progress-for-a-long-time).
+
 ## Claude Code
 
 ```sh
@@ -56,6 +66,10 @@ Edit `.cursor/mcp.json` in the project (or the global `~/.cursor/mcp.json`):
   }
 }
 ```
+
+Do not treat a missing Cursor dashboard row or missing agent-model activity in the IDE as a stall —
+ACP does not guarantee those host UI signals. Quiet sync and `mode="async"` guidance apply the same
+way as for any other MCP client (see [Quiet synchronous calls](#quiet-synchronous-calls)).
 
 ## Codex
 

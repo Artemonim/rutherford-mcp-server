@@ -15,7 +15,8 @@ partial) but not that the agent was actually torn down. These close that gap:
 3. ``ACPSession.open()`` tears the spawned agent down when a cancel lands DURING the handshake (a
    ``CancelledError`` is a ``BaseException``, so the per-stage ``except Exception`` guards miss it).
 4. ``ACPSession.prompt`` issues ``session/cancel`` (the real ACP RPC) on a turn timeout.
-5. ``_run_sandboxed`` cleans up a stranded sandbox when a cancel lands DURING the shielded open.
+5. ``_run_sandboxed`` schedules deferred cleanup of a stranded sandbox when a cancel lands DURING the
+   shielded open (caller raises immediately; the eventual open is cleaned without leak).
 
 The reap PRIMITIVES (snapshot/reap killing a real process tree) are covered by ``test_teardown.py``; here
 we cover the v3 paths that CALL them.
@@ -343,18 +344,20 @@ async def test_turn_timeout_issues_session_cancel(monkeypatch: Any) -> None:
 
 
 async def test_sandboxed_open_cancel_cleans_up_the_stranded_sandbox(monkeypatch: Any, tmp_path: Path) -> None:
-    # A cancel that lands WHILE the worktree/copy is being built must not strand it: the shielded open is
-    # awaited to recover the handle, cleaned up, then the cancel re-raised. Nothing tests this path otherwise.
+    # A cancel that lands WHILE the worktree/copy is being built must not strand it: the caller raises
+    # CancelledError immediately, and deferred cleanup awaits the eventual open handle then cleans it.
     config = RutherfordConfig(trusted_workspaces=[str(tmp_path)])
     service = DelegationService(DescriptorRegistry([FAKE]), config)
     cleaned: list[bool] = []
     entered = threading.Event()
+    cleanup_done = threading.Event()
 
     class _SpySandbox:
         root = str(tmp_path)
 
         def cleanup(self) -> None:
             cleaned.append(True)
+            cleanup_done.set()
 
     def slow_open(cwd: str) -> _SpySandbox:
         entered.set()  # signal the open thread is in flight
@@ -375,4 +378,5 @@ async def test_sandboxed_open_cancel_cleans_up_the_stranded_sandbox(monkeypatch:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert await asyncio.to_thread(cleanup_done.wait, 5.0)
     assert cleaned == [True]  # the stranded sandbox was cleaned up despite the mid-open cancel

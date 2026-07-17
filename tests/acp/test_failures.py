@@ -15,6 +15,7 @@ from rutherford.domain.error_codes import ErrorCode
     [
         ErrorCode.ACP_SPAWN_FAILED,
         ErrorCode.ACP_HANDSHAKE_FAILED,
+        ErrorCode.ACP_PRE_PROMPT_TIMEOUT,
         ErrorCode.ACP_TURN_TIMEOUT,
         ErrorCode.ACP_TURN_ERROR,
         ErrorCode.RATE_LIMITED,

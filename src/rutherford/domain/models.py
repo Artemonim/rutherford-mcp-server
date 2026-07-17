@@ -479,6 +479,11 @@ class DelegationRequest(BaseModel):
     safety_mode: SafetyMode = SafetyMode.READ_ONLY
     mode: DelegationMode = DelegationMode.SYNC
     timeout_s: float | None = None
+    #: Hard deadline (seconds) for pre-prompt work only: sandbox prep, ACP spawn, initialize, session
+    #: create/load, and model/effort selection. Ends before ``session/prompt`` is accepted. Distinct from
+    #: ``timeout_s`` (a running prompt). ``None`` follows per-agent ``pre_prompt_timeout_s`` or
+    #: ``default_pre_prompt_timeout_s``.
+    pre_prompt_timeout_s: float | None = Field(default=None, gt=0)
     #: The reasoning-effort tier to ask the CLI to spend (F8a, decision 2-L), the producer "how much may
     #: it think" knob -- distinct from ``timeout_s`` (the unresponsiveness fault). Mapped per adapter to
     #: its native flag (``map_effort``), clamped to the nearest supported tier, no-op + reported where
@@ -665,6 +670,10 @@ class ConsensusRequest(BaseModel):
     safety_mode: SafetyMode = SafetyMode.READ_ONLY
     synthesize: bool | None = None
     timeout_s: float | None = None
+    #: Hard pre-prompt deadline (seconds) for every voice: sandbox / spawn / handshake / model selection.
+    #: Distinct from ``timeout_s`` (a running prompt) and from ``time_budget_s`` (the panel harvest deadline).
+    #: ``None`` follows per-agent or ``default_pre_prompt_timeout_s``.
+    pre_prompt_timeout_s: float | None = Field(default=None, gt=0)
     include_raw: bool = False
     #: Build the panel from every installed + authenticated adapter instead of ``targets``.
     expand_all: bool = False
@@ -930,6 +939,10 @@ class DebateRequest(BaseModel):
     safety_mode: SafetyMode = SafetyMode.READ_ONLY
     synthesize: bool = True
     timeout_s: float | None = None
+    #: Hard pre-prompt deadline (seconds) for opening each voice's session (spawn / handshake / model
+    #: selection). Distinct from ``timeout_s`` (each prompt turn) and from ``time_budget_s`` (the debate
+    #: harvest deadline). ``None`` follows per-agent or ``default_pre_prompt_timeout_s``.
+    pre_prompt_timeout_s: float | None = Field(default=None, gt=0)
     include_raw: bool = False
     #: An optional target to write the closing synthesis. Defaults to the first surviving voice when
     #: unset; pass a distinct CLI for an independent, non-participant judge.

@@ -32,6 +32,7 @@ async def delegate_tool(
     files: list[str] | None = None,
     safety_mode: str | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     trust_workspace: bool = False,
     role: str | None = None,
     effort: str | None = None,
@@ -60,6 +61,10 @@ async def delegate_tool(
     default) lets a model-unavailable failure retry the SAME agent on its configured ``fallback_model`` first,
     where it has one (most ACP agents do not -- a clean no-op).
 
+    ``pre_prompt_timeout_s`` bounds sandbox prep, spawn, handshake, and model/effort selection separately from
+    ``timeout_s`` (which governs only a running prompt). ``None`` follows per-agent or
+    ``default_pre_prompt_timeout_s`` (90s). Semaphore queue wait does not consume this budget.
+
     ``persist`` keeps this run as a durable job under ``<jobs_dir>/<run_id>/`` (F2: ``state.json`` plus the
     answer / diff artifacts), so it survives the process. ``None`` follows the configured
     ``default_persistence`` (``ephemeral`` out of the box -- nothing on disk unless asked); ``True`` / ``False``
@@ -85,6 +90,7 @@ async def delegate_tool(
         role=role,
         safety_mode=safety,
         timeout_s=timeout_s,
+        pre_prompt_timeout_s=pre_prompt_timeout_s,
         trust_workspace=trust_workspace,
         effort=parse_effort(effort),
         fallback=fallback_targets,

@@ -124,6 +124,10 @@ def _env_overrides(env: Mapping[str, str]) -> dict[str, Any]:
         overrides["max_concurrency"] = _as_int("RUTHERFORD_MAX_CONCURRENCY", value)
     if (value := env.get("RUTHERFORD_DEFAULT_TIMEOUT_S")) is not None:
         overrides["default_timeout_s"] = _as_float("RUTHERFORD_DEFAULT_TIMEOUT_S", value)
+    if (value := env.get("RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S")) is not None:
+        overrides["default_pre_prompt_timeout_s"] = _as_float("RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S", value)
+    if (value := env.get("RUTHERFORD_ACP_PROMPT_HEARTBEAT_S")) is not None:
+        overrides["acp_prompt_heartbeat_s"] = _as_float("RUTHERFORD_ACP_PROMPT_HEARTBEAT_S", value)
     if (value := env.get("RUTHERFORD_DEFAULT_SAFETY")) is not None:
         overrides["default_safety_mode"] = value
     if (value := env.get("RUTHERFORD_TRUSTED_WORKSPACES")) is not None:

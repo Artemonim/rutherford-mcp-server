@@ -66,7 +66,11 @@ def _starter_config(config: RutherfordConfig, *, trust_workspace: bool, cwd: Pat
         "# project README and docs/ for the full schema.",
         "",
         f'default_safety_mode = "{safety}"   # read_only | propose | write | yolo (write/yolo need a trusted ws)',
-        f"default_timeout_s = {timeout}        # per-run wall-clock timeout, in seconds",
+        f"default_timeout_s = {timeout}        # per-run prompt timeout, in seconds",
+        (
+            f"default_pre_prompt_timeout_s = {_format_number(config.default_pre_prompt_timeout_s)}  "
+            "# sandbox/spawn/handshake deadline"
+        ),
         f"auto_detect_local_models = {auto_detect}  # probe a running Ollama (:11434) / LM Studio (:1234) for voices",
         f"max_targets = {max_targets}             # most agents a single consensus call may fan out to",
         "",

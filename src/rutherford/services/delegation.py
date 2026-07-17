@@ -24,7 +24,7 @@ from ..acp.cooldown import CooldownTracker
 from ..acp.descriptors import AgentDescriptor, DescriptorRegistry
 from ..acp.failures import indicates_unhealthy, is_model_unavailable
 from ..acp.permission import PermissionPolicy
-from ..acp.sandbox import SandboxManager
+from ..acp.sandbox import Sandbox, SandboxManager
 from ..acp.session import run_acp_turn
 from ..config.schema import RutherfordConfig
 from ..domain.enums import ActivityEventKind, Effort, JobStatus, ReexecutionSafety, is_mutating, runs_sandboxed
@@ -32,6 +32,7 @@ from ..domain.error_codes import ErrorCode
 from ..domain.errors import RutherfordError
 from ..domain.models import ActivityEvent, DelegationRequest, DelegationResult, ErrorInfo, RunRecord, Target, Topology
 from ..io.ledger import RunLedger
+from ..runtime.acp_trace import acp_trace, bind_acp_trace, path_leaf
 from ..runtime.depth import ensure_within_depth
 from ..runtime.logging import log_event
 
@@ -142,6 +143,48 @@ class DelegationService:
         #: delegation runs in, so an agent's write/yolo/propose edits land in a throwaway tree and only a
         #: reviewed diff is applied back. Stateless across calls.
         self._sandbox = SandboxManager()
+        #: Strong refs for deferred stranded-sandbox cleanups so a timed-out / cancelled open (or a
+        #: post-open pre-prompt budget miss) cannot leak a worktree after the caller has already returned
+        #: ``ACP_PRE_PROMPT_TIMEOUT`` / ``CancelledError``.
+        self._stranded_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    def _defer_sandbox_cleanup(self, sandbox: Sandbox) -> None:
+        """Best-effort cleanup of an already-opened stranded sandbox without blocking the caller.
+
+        Same ownership discipline as :meth:`_defer_sandbox_open_cleanup`: keep a strong task ref until
+        finished, and consume cleanup exceptions so a slow or failing teardown cannot stretch the
+        caller's hard pre-prompt deadline.
+        """
+
+        async def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(sandbox.cleanup)
+
+        task = asyncio.create_task(_cleanup(), name="rutherford-stranded-sandbox-cleanup")
+        self._stranded_cleanup_tasks.add(task)
+        task.add_done_callback(self._stranded_cleanup_tasks.discard)
+
+    def _defer_sandbox_open_cleanup(self, open_task: asyncio.Future[Sandbox]) -> None:
+        """Clean up a sandbox open that outlived the caller's deadline without blocking the caller.
+
+        The open runs in a worker thread (uncancellable). When the pre-prompt budget or a cancel abandons
+        the wait, schedule a background task that awaits the eventual handle (or consumes a late open error
+        so it is not an unretrieved-task warning) and best-effort cleans up — preserving no-leak semantics
+        while keeping the caller's deadline hard.
+        """
+
+        async def _cleanup_when_ready() -> None:
+            try:
+                stranded = await open_task
+            except Exception:
+                # * Open failed after we abandoned the wait; nothing to clean, error already consumed.
+                return
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(stranded.cleanup)
+
+        task = asyncio.create_task(_cleanup_when_ready(), name="rutherford-stranded-sandbox-cleanup")
+        self._stranded_cleanup_tasks.add(task)
+        task.add_done_callback(self._stranded_cleanup_tasks.discard)
 
     @property
     def semaphore(self) -> asyncio.Semaphore:
@@ -168,6 +211,7 @@ class DelegationService:
         correlation_id: str = "",
         base_depth: int = 0,
         on_activity: ActivityCallback | None = None,
+        attempt: int = 1,
     ) -> DelegationResult:
         """Run ``req`` against its target agent (with fallback) and return the normalized result.
 
@@ -188,6 +232,29 @@ class DelegationService:
         ``delegation_call_count`` counts every subprocess attempt (the primary plus each fallback re-run), so a
         panel's realized fan-out includes the fallbacks.
         """
+        with bind_acp_trace(
+            correlation_id=correlation_id,
+            tool="delegate",
+            attempt=attempt,
+            cli=req.target.cli,
+            model=req.target.model,
+            depth=base_depth,
+            heartbeat_s=self._config.acp_prompt_heartbeat_s,
+        ):
+            return await self._delegate_body(
+                req, correlation_id=correlation_id, base_depth=base_depth, on_activity=on_activity, attempt=attempt
+            )
+
+    async def _delegate_body(
+        self,
+        req: DelegationRequest,
+        *,
+        correlation_id: str,
+        base_depth: int,
+        on_activity: ActivityCallback | None,
+        attempt: int,
+    ) -> DelegationResult:
+        """Body of :meth:`delegate` under an active :func:`bind_acp_trace` scope."""
         created_at = self._clock()
         if not self._descriptors.has(req.target.cli):
             known = ", ".join(self._descriptors.ids()) or "(none)"
@@ -235,7 +302,9 @@ class DelegationService:
         # in turn. A benched alternate is skipped. A winning alternate's result is adopted whole (its own
         # provenance / health / count); the chain total is folded into the returned count either way.
         if self._should_cross_fallback(req, result):
-            recovered, alternate_attempts = await self._fallback_chain(req, result, correlation_id, base_depth)
+            recovered, alternate_attempts = await self._fallback_chain(
+                req, result, correlation_id, base_depth, attempt=attempt
+            )
             attempts += alternate_attempts
             if recovered is not None:
                 # The winning alternate persisted its OWN leaf record inside its recursive ``delegate`` call
@@ -269,13 +338,18 @@ class DelegationService:
         descriptor = self._descriptors.get(req.target.cli)
         cwd = req.working_dir or str(Path.cwd())
         timeout = req.timeout_s or self._config.timeout_for(req.target.cli) or self._config.default_timeout_s
+        pre_prompt = self._config.resolve_pre_prompt_timeout_s(req.target.cli, req.pre_prompt_timeout_s)
         prompt = _compose_prompt(req.prompt, req.files)
         if runs_sandboxed(req.safety_mode) and req.working_dir:
-            result = await self._run_sandboxed(req, descriptor, prompt, cwd, timeout_s=timeout, base_depth=base_depth)
+            result = await self._run_sandboxed(
+                req, descriptor, prompt, cwd, timeout_s=timeout, pre_prompt_timeout_s=pre_prompt, base_depth=base_depth
+            )
         else:
-            result = await self._run_direct(req, descriptor, prompt, cwd, timeout_s=timeout, base_depth=base_depth)
+            result = await self._run_direct(
+                req, descriptor, prompt, cwd, timeout_s=timeout, pre_prompt_timeout_s=pre_prompt, base_depth=base_depth
+            )
         result.delegation_call_count = 1
-        self._record_health(req.target.cli, result)
+        self.record_health(req.target.cli, result)
         return result
 
     async def _run_direct(
@@ -286,6 +360,7 @@ class DelegationService:
         cwd: str,
         *,
         timeout_s: float,
+        pre_prompt_timeout_s: float,
         base_depth: int,
     ) -> DelegationResult:
         """Run the turn directly in ``cwd`` (no sandbox), with the optional ``verify_read_only`` fingerprint.
@@ -294,11 +369,18 @@ class DelegationService:
         already denies writes). When ``verify_read_only`` is on and ``cwd`` is a git repo, the tree under it is
         fingerprinted before and after a SUCCESSFUL turn; a change fails the result with ``READONLY_VIOLATED``
         -- the agent's read-only promise made a checked invariant rather than a trusted one.
+
+        The concurrency semaphore is acquired BEFORE the pre-prompt clock starts, so queue wait does not
+        consume the pre-prompt budget.
         """
         policy = PermissionPolicy(mode=req.safety_mode, sandboxed=False)
         verify = self._config.verify_read_only and not is_mutating(req.safety_mode)
         before = _git_fingerprint(cwd) if verify else None
+        queue_started = time.monotonic()
+        acp_trace("queue", "enter", paths={"cwd_leaf": path_leaf(cwd)})
         async with self._semaphore:
+            wait_s = round(time.monotonic() - queue_started, 3)
+            acp_trace("queue", "exit", status="ok", timing={"wait_s": wait_s}, paths={"cwd_leaf": path_leaf(cwd)})
             result = await run_acp_turn(
                 descriptor,
                 prompt,
@@ -310,6 +392,7 @@ class DelegationService:
                 base_depth=base_depth,
                 parent_run_id=req.parent_run_id,
                 resume_session_id=req.session_id,  # resume a prior agent session over ACP, where supported
+                pre_prompt_timeout_s=pre_prompt_timeout_s,
             )
         # Check the fingerprint whether or not the turn SUCCEEDED: a read-only agent that mutated the tree and
         # then failed (or returned empty) still broke the read-only promise, and the side effect is the signal
@@ -328,6 +411,7 @@ class DelegationService:
         cwd: str,
         *,
         timeout_s: float,
+        pre_prompt_timeout_s: float,
         base_depth: int,
     ) -> DelegationResult:
         """Run a mutating turn inside an isolated worktree / temp copy; capture (and for write/yolo apply) the diff.
@@ -339,29 +423,146 @@ class DelegationService:
         agent's process tree is reaped by the session teardown. A sandbox setup failure (e.g. a non-git tree
         over the copy guard) becomes a failed result rather than an unsandboxed run -- write mode never silently
         runs against the user's tree.
+
+        Sandbox creation is bounded by the pre-prompt deadline; semaphore queue wait after a successful open
+        does not consume that budget. Remaining budget is passed to :func:`run_acp_turn` for spawn/handshake.
+
+        When the open misses the budget (or a cancel lands mid-open), the caller returns / raises immediately —
+        the still-running thread open is not awaited on the request path. Cleanup is deferred so a late success
+        cannot leak a worktree, and a late open error is consumed (no unretrieved-task warning).
+
+        When open succeeds but the pre-prompt budget is already exhausted, cleanup is likewise deferred: a
+        slow ``sandbox.cleanup`` must not stretch the caller's hard deadline.
         """
-        # Open under a shield so a cancellation mid-open cannot strand a half-built worktree / temp copy: the
-        # open runs in a thread (which cannot be cancelled), so on a cancel we still await the shielded open to
-        # recover the handle, clean it up, then propagate -- otherwise the dir (and a git worktree admin entry)
-        # would leak because the ``finally`` below never sees a ``sandbox``.
-        open_task = asyncio.ensure_future(asyncio.to_thread(self._sandbox.open, cwd))
+        # Open under a shield so a cancellation mid-open cannot cancel the thread future itself: the open runs
+        # off-thread (uncancellable). On timeout / cancel we defer cleanup of the eventual handle rather than
+        # awaiting it on the caller path — otherwise the pre-prompt / cancel deadline would not be hard.
+        pre_prompt_started = time.monotonic()
+        acp_trace(
+            "sandbox",
+            "enter",
+            paths={"cwd_leaf": path_leaf(cwd)},
+            timing={"budget_s": pre_prompt_timeout_s},
+        )
+        open_task: asyncio.Future[Sandbox] = asyncio.ensure_future(asyncio.to_thread(self._sandbox.open, cwd))
         try:
-            sandbox = await asyncio.shield(open_task)
+            sandbox = await asyncio.wait_for(asyncio.shield(open_task), timeout=pre_prompt_timeout_s)
+        except TimeoutError:
+            elapsed = round(time.monotonic() - pre_prompt_started, 3)
+            self._defer_sandbox_open_cleanup(open_task)
+            acp_trace(
+                "sandbox",
+                "exit",
+                status="failed",
+                error={
+                    "code": ErrorCode.ACP_PRE_PROMPT_TIMEOUT.value,
+                    "reexecution_safety": ReexecutionSafety.SAFE.value,
+                    "stage": "sandbox",
+                    "budget_s": pre_prompt_timeout_s,
+                    "elapsed_s": elapsed,
+                },
+                timing={"elapsed_s": elapsed, "budget_s": pre_prompt_timeout_s},
+                paths={"cwd_leaf": path_leaf(cwd)},
+            )
+            return _fail(
+                req,
+                ErrorCode.ACP_PRE_PROMPT_TIMEOUT,
+                f"sandbox for {req.target.cli} was not ready within {_format_budget_s(pre_prompt_timeout_s)}s",
+                details={
+                    "stage": "sandbox",
+                    "budget_s": pre_prompt_timeout_s,
+                    "elapsed_s": elapsed,
+                },
+                reexecution_safety=ReexecutionSafety.SAFE,
+            )
         except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                stranded = await open_task
-                await asyncio.to_thread(stranded.cleanup)
+            self._defer_sandbox_open_cleanup(open_task)
+            acp_trace("cancelled", "exit", status="cancelled", paths={"cwd_leaf": path_leaf(cwd)})
             raise
         except RutherfordError as exc:
+            acp_trace(
+                "sandbox",
+                "exit",
+                status="failed",
+                error={"code": exc.code.value},
+                paths={"cwd_leaf": path_leaf(cwd)},
+            )
             return _fail(req, exc.code, exc.message, details=exc.details)
         except OSError as exc:
             # Building the sandbox is filesystem I/O (mkdtemp / copytree / mkdir): a failure (disk full, a
             # permission error, a vanished file mid-copy) is an operational fault, not a crash -- the delegation
             # primitive contract is that every fault returns a structured result, never raises onto the panel.
+            # * Do not log the raw OSError text (may embed absolute paths).
+            acp_trace(
+                "sandbox",
+                "exit",
+                status="failed",
+                error={"code": ErrorCode.INTERNAL.value},
+                paths={"cwd_leaf": path_leaf(cwd)},
+            )
             return _fail(req, ErrorCode.INTERNAL, f"could not build the write sandbox for {cwd}: {exc}")
+        # * Emit exactly one terminal sandbox/exit: failed when the budget is already gone, else ok.
+        # Never ok-then-failed for the same prep attempt (misleading when remaining hits zero after open).
+        # * Defer cleanup when the budget is already gone — awaiting it would break the hard deadline.
+        sandbox_elapsed = round(time.monotonic() - pre_prompt_started, 3)
+        remaining = pre_prompt_timeout_s - (time.monotonic() - pre_prompt_started)
+        if remaining <= 0:
+            self._defer_sandbox_cleanup(sandbox)
+            acp_trace(
+                "sandbox",
+                "exit",
+                status="failed",
+                error={
+                    "code": ErrorCode.ACP_PRE_PROMPT_TIMEOUT.value,
+                    "reexecution_safety": ReexecutionSafety.SAFE.value,
+                    "stage": "sandbox",
+                },
+                timing={
+                    "elapsed_s": sandbox_elapsed,
+                    "budget_s": pre_prompt_timeout_s,
+                },
+                paths={"cwd_leaf": path_leaf(cwd), "sandbox_leaf": path_leaf(sandbox.root)},
+            )
+            return _fail(
+                req,
+                ErrorCode.ACP_PRE_PROMPT_TIMEOUT,
+                f"sandbox for {req.target.cli} exhausted the "
+                f"{_format_budget_s(pre_prompt_timeout_s)}s pre-prompt budget",
+                details={
+                    "stage": "sandbox",
+                    "budget_s": pre_prompt_timeout_s,
+                    "elapsed_s": sandbox_elapsed,
+                },
+                reexecution_safety=ReexecutionSafety.SAFE,
+            )
+        acp_trace(
+            "sandbox",
+            "exit",
+            status="ok",
+            sandbox={"active": True, "kind": "worktree" if sandbox.is_git else "copy"},
+            paths={"cwd_leaf": path_leaf(cwd), "sandbox_leaf": path_leaf(sandbox.root)},
+            timing={"stage_elapsed_s": sandbox_elapsed, "budget_s": pre_prompt_timeout_s},
+        )
         policy = PermissionPolicy(mode=req.safety_mode, sandboxed=True)
         try:
+            # * Semaphore wait is outside the remaining pre-prompt clock: queue time must not burn the budget.
+            queue_started = time.monotonic()
+            acp_trace(
+                "queue",
+                "enter",
+                sandbox={"active": True, "kind": "worktree" if sandbox.is_git else "copy"},
+                paths={"cwd_leaf": path_leaf(cwd), "sandbox_leaf": path_leaf(sandbox.root)},
+            )
             async with self._semaphore:
+                wait_s = round(time.monotonic() - queue_started, 3)
+                acp_trace(
+                    "queue",
+                    "exit",
+                    status="ok",
+                    timing={"wait_s": wait_s},
+                    sandbox={"active": True, "kind": "worktree" if sandbox.is_git else "copy"},
+                    paths={"cwd_leaf": path_leaf(cwd), "sandbox_leaf": path_leaf(sandbox.root)},
+                )
                 result = await run_acp_turn(
                     descriptor,
                     prompt,
@@ -374,6 +575,9 @@ class DelegationService:
                     parent_run_id=req.parent_run_id,
                     sandbox_root=sandbox.root,
                     resume_session_id=req.session_id,  # resume a prior agent session (conversation, not the tree)
+                    pre_prompt_timeout_s=remaining,
+                    pre_prompt_total_budget_s=pre_prompt_timeout_s,
+                    pre_prompt_elapsed_s=pre_prompt_timeout_s - remaining,
                 )
             if result.ok:
                 try:
@@ -424,13 +628,23 @@ class DelegationService:
         """
         return effort if effort is not None else self._config.effort_for(cli)
 
-    def _record_health(self, agent_id: str, result: DelegationResult) -> None:
+    def record_health(self, agent_id: str, result: DelegationResult) -> None:
         """Feed the cooldown tracker from a finished turn (F7): a success clears ``agent_id``'s failure
         streak; an UNHEALTHY failure (down / throttled / mis-launching / hung -- not a refusal, an empty
-        answer, or a bad-prompt guard) counts toward benching it."""
+        answer, or a bad-prompt guard) counts toward benching it.
+
+        The direct-session panel paths call this after a prompt outcome; the delegation path calls it after
+        its one-shot turn. Keeping that attribution here makes a pre-prompt timeout bench the same agent
+        regardless of which public tool launched it.
+        """
         if result.ok:
             self._cooldown.record_success(agent_id)
-        elif result.error is not None and indicates_unhealthy(result.error.code):
+        elif result.error is not None:
+            self.record_error_health(agent_id, result.error)
+
+    def record_error_health(self, agent_id: str, error: ErrorInfo) -> None:
+        """Record a direct session-open failure when it indicates an unhealthy agent seat."""
+        if indicates_unhealthy(error.code):
             self._cooldown.record_failure(agent_id)
 
     def _model_fallback_for(self, req: DelegationRequest, result: DelegationResult) -> str | None:
@@ -481,7 +695,13 @@ class DelegationService:
         )
 
     async def _fallback_chain(
-        self, req: DelegationRequest, primary: DelegationResult, correlation_id: str, base_depth: int
+        self,
+        req: DelegationRequest,
+        primary: DelegationResult,
+        correlation_id: str,
+        base_depth: int,
+        *,
+        attempt: int = 1,
     ) -> tuple[DelegationResult | None, int]:
         """Try each fallback target in order; return the first successful result and the alternates' attempts.
 
@@ -498,6 +718,7 @@ class DelegationService:
         """
         failed_labels = [primary.target.display_label]
         alternate_attempts = 0
+        next_attempt = attempt + 1
         for target in req.fallback[: self._config.max_targets]:
             if self._cooldown.is_benched(target.cli):
                 failed_labels.append(f"{target.display_label} (benched)")
@@ -508,7 +729,10 @@ class DelegationService:
             # Suppress the inner delegation's own activity events (on_activity=None): the voice's
             # voice_started already fired under the shared correlation id and exactly one voice_finished is
             # emitted by the outer delegate, so the activity table keeps one row per voice across the chain.
-            recovered = await self.delegate(fb_req, correlation_id=correlation_id, base_depth=base_depth)
+            recovered = await self.delegate(
+                fb_req, correlation_id=correlation_id, base_depth=base_depth, attempt=next_attempt
+            )
+            next_attempt += 1
             alternate_attempts += recovered.delegation_call_count
             if recovered.ok:
                 recovered.fallback_chain = failed_labels
@@ -649,14 +873,24 @@ def _compose_prompt(prompt: str, files: list[str]) -> str:
     return f"{prompt}\n\nFiles in scope:\n{listing}"
 
 
+def _format_budget_s(value: float) -> str:
+    """Render a pre-prompt budget for human messages without rounding a sub-second value to ``0``."""
+    return f"{value:g}"
+
+
 def _fail(
-    req: DelegationRequest, code: ErrorCode, message: str, *, details: dict[str, object] | None = None
+    req: DelegationRequest,
+    code: ErrorCode,
+    message: str,
+    *,
+    details: dict[str, object] | None = None,
+    reexecution_safety: ReexecutionSafety | None = None,
 ) -> DelegationResult:
     """Build a failed result from an up-front guard, carrying the request's target and safety mode."""
     return DelegationResult(
         target=Target(cli=req.target.cli, model=req.target.model),
         ok=False,
-        error=ErrorInfo(code=code, message=message, details=details),
+        error=ErrorInfo(code=code, message=message, details=details, reexecution_safety=reexecution_safety),
         safety_mode=req.safety_mode,
     )
 

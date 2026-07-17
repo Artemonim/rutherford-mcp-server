@@ -28,6 +28,7 @@ from ..domain.enums import JobStatus
 from ..domain.error_codes import ErrorCode
 from ..domain.errors import RutherfordError
 from ..domain.models import ActivityEvent
+from ..runtime.acp_trace import bind_acp_trace
 from .delegation import ActivityCallback
 
 #: A factory that builds the coroutine to run, given the job's live-activity sink (N1, item 3). A factory
@@ -198,7 +199,8 @@ class JobStore:
             self.append_activity(record.job_id, event)
 
         try:
-            result = await coro_factory(on_activity)
+            with bind_acp_trace(job_id=record.job_id, tool=record.tool or "job"):
+                result = await coro_factory(on_activity)
         except asyncio.CancelledError:
             async with self._lock:
                 record.status = JobStatus.CANCELLED

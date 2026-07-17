@@ -208,9 +208,12 @@ config file, a role file, or anywhere else in the repository.
 
 ## Process-tree teardown
 
-Every turn has a timeout (`default_timeout_s`, default 300s; overridable per call via `timeout_s`). On
+Every turn has a prompt timeout (`default_timeout_s`, default 300s; overridable per call via `timeout_s`). On
 timeout the session issues `session/cancel` and the turn fails as `ACP_TURN_TIMEOUT`, preserving any
-streamed partial answer on the result. When a session closes, `acp/teardown.py` reaps the agent's
+streamed partial answer on the result. Separately, a hard pre-prompt deadline
+(`default_pre_prompt_timeout_s`, default 90s; overridable via `pre_prompt_timeout_s`) bounds sandbox prep,
+spawn, handshake, and model/effort selection before `session/prompt` is accepted; expiry is
+`ACP_PRE_PROMPT_TIMEOUT` (SAFE, no partial). When a session closes, `acp/teardown.py` reaps the agent's
 orphaned descendant process tree: a wrapper agent spawns the underlying CLI as a child, and the SDK
 transport terminates only the direct child, so the descendants are snapshotted before teardown (a dead
 parent's children reparent and drop out of the walk) and killed after. This keeps a timed-out or
@@ -242,7 +245,10 @@ Before exposing Rutherford to an MCP client:
 - [ ] Set `max_depth` and `max_targets` if the defaults (3 and 8) are not right for your environment.
 - [ ] Keep API keys and session tokens in environment variables or each agent's own credential store,
   never in a repo file.
-- [ ] Set `default_timeout_s` to suit your slowest expected workload (default 300s).
+- [ ] Set `default_timeout_s` to suit your slowest expected workload (default 300s). Remember that
+  `mode="sync"` waits silently through the separate `default_pre_prompt_timeout_s` startup budget and
+  then that prompt budget; choose `mode="async"` before starting when operators need visibility or
+  `cancel_job` during the run.
 - [ ] Use `enabled_agents` to restrict the registry to the agents you actually use.
 
 ---

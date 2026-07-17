@@ -154,6 +154,7 @@ async def delegate(
     files: list[str] | None = None,
     safety_mode: str | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     trust_workspace: bool = False,
     role: str | None = None,
     effort: str | None = None,
@@ -178,8 +179,12 @@ async def delegate(
     re-execution-safe failure (a spawn/handshake failure that never ran the prompt); a benched alternate is
     skipped and `fallback_chain` records the path. A write/yolo delegation never falls back.
     `allow_model_fallback` (default true) first retries the same agent on its configured fallback model on a
-    model-unavailable failure, where it has one. `persist` keeps this run as a durable job under
-    `<jobs_dir>/<run_id>/` (`state.json` + answer / diff artifacts); `None` follows `default_persistence`
+    model-unavailable failure, where it has one. `timeout_s` bounds a running prompt after acceptance;
+    `pre_prompt_timeout_s` is separate and bounds sandbox prep when applicable, spawn, ACP initialize, session
+    create/load, and model/effort selection — it ends before prompt acceptance; when omitted, it resolves
+    through the per-agent or global `default_pre_prompt_timeout_s` (90s); semaphore queue wait does not
+    consume it. `persist` keeps this run as a durable job
+    under `<jobs_dir>/<run_id>/` (`state.json` + answer / diff artifacts); `None` follows `default_persistence`
     (`ephemeral` out of the box), `true` / `false` force it. `session_id` resumes a prior agent session: pass
     the `session_id` from an earlier delegate result and the agent reloads that conversation (ACP
     `session/load`) instead of starting fresh, so a follow-up turn continues it; agents that do not persist
@@ -196,6 +201,7 @@ async def delegate(
             files=files,
             safety_mode=safety_mode,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
             trust_workspace=trust_workspace,
             role=role,
             effort=effort,
@@ -218,6 +224,7 @@ async def continue_job(
     files: list[str] | None = None,
     safety_mode: str | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     trust_workspace: bool = False,
     role: str | None = None,
     effort: str | None = None,
@@ -235,9 +242,12 @@ async def continue_job(
     per-seat steering, all inherited unless overridden here. A seat whose agent cannot reload its ACP session
     is recorded as a failed voice, never silently dropped. The continuation is a fresh run linked to the
     parent (`continued_from`) -- the parent is never mutated. The trust gate is re-applied fresh and defaults
-    to `read_only` (panels are read-only deliberation regardless). `persist` (default true) keeps the
-    continuation as its own durable child job. `mode="async"` runs it as a background job and returns a
-    `job_id`.
+    to `read_only` (panels are read-only deliberation regardless). `timeout_s` bounds a running prompt after
+    acceptance; `pre_prompt_timeout_s` is separate and bounds sandbox prep when applicable, spawn, ACP
+    initialize, session create/load, and model/effort selection — it ends before prompt acceptance; when
+    omitted, it resolves through the per-agent or global `default_pre_prompt_timeout_s` (90s); semaphore
+    queue wait does not consume it. `persist` (default true) keeps the continuation as its own durable child
+    job. `mode="async"` runs it as a background job and returns a `job_id`.
     """
     return await _guarded(
         continue_job_tool(
@@ -249,6 +259,7 @@ async def continue_job(
             files=files,
             safety_mode=safety_mode,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
             trust_workspace=trust_workspace,
             role=role,
             effort=effort,
@@ -278,6 +289,7 @@ async def consensus(
     safety_mode: str | None = None,
     synthesize: bool | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     role: str | None = None,
     effort: str | None = None,
     time_budget_s: float | None = None,
@@ -307,16 +319,20 @@ async def consensus(
     `stances` (parallel to `targets`) steer each voice and cannot combine with the auto-expanded panel.
     `synthesize` (defaults to `synthesize_default`, off
     out of the box) adds a server-side combined answer (`all-voices` only); `judge` names the seat that
-    writes it. `timeout_s` applies to every voice; one failing voice is a failed result, never an aborted
-    panel. Consensus is read-only deliberation: a `safety_mode` beyond `read_only` (`propose` / `write` /
-    `yolo`) is refused -- there is no coherent merge of edits from several agents into one tree -- so route
-    write / propose work through `delegate` (a single agent isolated in a worktree sandbox). `role` names a
-    persona (see `list_roles`) prepended to the prompt every voice
-    receives. `effort` (low | medium | high | xhigh) asks every voice to spend more reasoning where it has a
-    knob. `time_budget_s` is a wall-clock deadline for the WHOLE panel (distinct from each voice's
-    `timeout_s`): at the deadline answered voices are kept, in-flight ones cut, and the panel aggregates over
-    the harvest if `min_quorum` usable remain (`stop_reason="budget"`, with a `rollup`); below `min_quorum`
-    is `BUDGET_EXHAUSTED`. `on_budget` is harvest | continue | resume (default `default_on_budget`). `persist`
+    writes it. `timeout_s` applies to every voice's running prompt after acceptance; `pre_prompt_timeout_s`
+    is separate and bounds each voice's sandbox prep when applicable, spawn, ACP initialize, session
+    create/load, and model/effort selection — it ends before that voice's prompt acceptance; when omitted,
+    it resolves through the per-agent or global `default_pre_prompt_timeout_s` (90s); semaphore queue wait
+    does not consume it. One failing voice is a failed
+    result, never an aborted panel. Consensus is read-only deliberation: a `safety_mode` beyond `read_only`
+    (`propose` / `write` / `yolo`) is refused -- there is no coherent merge of edits from several agents into
+    one tree -- so route write / propose work through `delegate` (a single agent isolated in a worktree
+    sandbox). `role` names a persona (see `list_roles`) prepended to the prompt every voice receives.
+    `effort` (low | medium | high | xhigh) asks every voice to spend more reasoning where it has a knob.
+    `time_budget_s` is a wall-clock deadline for the WHOLE panel (distinct from each voice's `timeout_s`):
+    at the deadline answered voices are kept, in-flight ones cut, and the panel aggregates over the harvest
+    if `min_quorum` usable remain (`stop_reason="budget"`, with a `rollup`); below `min_quorum` is
+    `BUDGET_EXHAUSTED`. `on_budget` is harvest | continue | resume (default `default_on_budget`). `persist`
     keeps the panel as a durable job (F2): a parent `state.json` linking a child record per voice, plus
     `voices/voice-N.md` artifacts; `None` follows `default_persistence`, `true` / `false` force it.
     `mode="async"` runs the panel as a background job and returns a `job_id` (poll with `job_status` /
@@ -342,6 +358,7 @@ async def consensus(
             safety_mode=safety_mode,
             synthesize=synthesize,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
             role=role,
             effort=effort,
             time_budget_s=time_budget_s,
@@ -371,6 +388,7 @@ async def debate(
     safety_mode: str | None = None,
     synthesize: bool = True,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     role: str | None = None,
     effort: str | None = None,
     time_budget_s: float | None = None,
@@ -398,14 +416,18 @@ async def debate(
     the voices run on persistent sessions in the working directory with no per-turn sandbox -- so route write /
     propose work through `delegate` (a single agent isolated in a worktree sandbox). `role` names a
     persona (see `list_roles`) prepended to the opening prompt every voice argues from. `effort` (low |
-    medium | high | xhigh) asks every voice to spend more reasoning where it has a knob. `time_budget_s` is a
-    wall-clock deadline for the WHOLE debate enforced at round boundaries: a round still in flight at the
-    deadline is cut and the transcript so far is finalized (`stop_reason="budget"`, with a `rollup`);
-    `on_budget` is harvest | continue | resume (default `default_on_budget`; `continue` runs every round to
-    completion). `persist` keeps the debate as a durable job (F2): a parent `state.json` plus the full
-    `transcript.md`; `None` follows `default_persistence`, `true` / `false` force it. `mode="async"` runs the
-    debate as a background job and returns a `job_id` (poll with `job_status` / `job_result`); `mode="sync"`
-    awaits it.
+    medium | high | xhigh) asks every voice to spend more reasoning where it has a knob. `timeout_s` applies
+    to every voice's running prompt after acceptance; `pre_prompt_timeout_s` is separate and bounds each
+    voice's sandbox prep when applicable, spawn, ACP initialize, session create/load, and model/effort
+    selection — it ends before that voice's prompt acceptance; when omitted, it resolves through the
+    per-agent or global `default_pre_prompt_timeout_s` (90s); semaphore queue wait does not consume it.
+    `time_budget_s` is a wall-clock deadline for the
+    WHOLE debate enforced at round boundaries: a round still in flight at the deadline is cut and the
+    transcript so far is finalized (`stop_reason="budget"`, with a `rollup`); `on_budget` is harvest |
+    continue | resume (default `default_on_budget`; `continue` runs every round to completion). `persist`
+    keeps the debate as a durable job (F2): a parent `state.json` plus the full `transcript.md`; `None`
+    follows `default_persistence`, `true` / `false` force it. `mode="async"` runs the debate as a background
+    job and returns a `job_id` (poll with `job_status` / `job_result`); `mode="sync"` awaits it.
     """
     return await _guarded(
         debate_tool(
@@ -423,6 +445,7 @@ async def debate(
             safety_mode=safety_mode,
             synthesize=synthesize,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
             role=role,
             effort=effort,
             time_budget_s=time_budget_s,
@@ -470,6 +493,7 @@ async def review(
     working_dir: str | None = None,
     synthesize: bool | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
 ) -> str:
     """Review a diff or a set of files across one or more ACP agents (read-only). Provide `diff` or `paths`.
 
@@ -478,7 +502,11 @@ async def review(
     `cli` / `cli:model` strings); or name a saved `panel` (with optional `panel_overrides`) instead -- the
     two are mutually exclusive. Provide `diff` (a unified diff, inlined into the prompt) or `paths` (files put
     in scope for the agents to read). `synthesize` defaults on (the combined verdict); pass `false` for the
-    raw per-voice reviews. Always read-only -- a review never mutates the tree.
+    raw per-voice reviews. `timeout_s` applies to every voice's running prompt after acceptance;
+    `pre_prompt_timeout_s` is separate and bounds each voice's sandbox prep when applicable, spawn, ACP
+    initialize, session create/load, and model/effort selection — it ends before that voice's prompt
+    acceptance; when omitted, it resolves through the per-agent or global `default_pre_prompt_timeout_s`
+    (90s); semaphore queue wait does not consume it. Always read-only -- a review never mutates the tree.
     """
     return await _guarded(
         review_tool(
@@ -492,6 +520,7 @@ async def review(
             working_dir=working_dir,
             synthesize=synthesize,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
         )
     )
 

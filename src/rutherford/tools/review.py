@@ -27,6 +27,7 @@ async def review_tool(
     working_dir: str | None = None,
     synthesize: bool | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
 ) -> str:
     """Review a diff or a set of files across one or more agents and return every voice.
 
@@ -38,7 +39,11 @@ async def review_tool(
     (files put in scope for the agents to read), and either a list of ``targets`` or a saved ``panel`` (with
     optional ``panel_overrides``); panel and targets are mutually exclusive. ``synthesize`` defaults on (a
     combined verdict is the useful default for a review); pass ``false`` for the raw per-voice reviews.
-    Returns the ``ConsensusResult`` / ``StrategyResult`` envelope consensus produces.
+    ``timeout_s`` bounds each voice's running prompt after acceptance; ``pre_prompt_timeout_s`` is separate
+    and bounds each voice's sandbox prep when applicable, spawn, handshake, and model/effort selection — it
+    ends before that voice's prompt acceptance; when omitted, it resolves through the per-agent or global
+    ``default_pre_prompt_timeout_s`` (90s); semaphore queue wait does not consume it. Returns the
+    ``ConsensusResult`` / ``StrategyResult`` envelope consensus produces.
     """
     if not diff and not paths:
         raise RutherfordError(ErrorCode.INVALID_INPUT, "review needs either 'diff' or 'paths'")
@@ -61,6 +66,7 @@ async def review_tool(
         # ``synthesize_default`` is off; an explicit ``False`` from the caller still wins.
         synthesize=True if synthesize is None else synthesize,
         timeout_s=timeout_s,
+        pre_prompt_timeout_s=pre_prompt_timeout_s,
     )
     result = await app.consensus.consensus(request)
     return tool_success(result)

@@ -40,6 +40,7 @@ from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from ..domain.enums import Effort, ReexecutionSafety
 from ..domain.error_codes import ErrorCode
 from ..domain.models import Cost, DelegationResult, ErrorInfo, Provenance, Target
+from ..runtime.acp_trace import PromptHeartbeat, acp_trace, launch_command_basename, path_leaf
 from ..runtime.depth import child_env
 from .client import RutherfordACPClient
 from .descriptors import AgentDescriptor
@@ -75,18 +76,27 @@ PromptBlock = (
 
 
 class ACPHandshakeError(Exception):
-    """A session could not be opened (spawn or handshake failed). Pre-prompt, so re-execution-safe.
+    """A session could not be opened (spawn, handshake, or pre-prompt deadline). Pre-prompt, so re-execution-safe.
 
     Carries the ACP error code and the re-execution-safety classification so a caller can turn it into a
     failed result or decide a fallback. Raised by :meth:`ACPSession.open`; :func:`run_acp_turn` converts it
     to a failed :class:`DelegationResult`.
     """
 
-    def __init__(self, code: ErrorCode, message: str, safety: ReexecutionSafety) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        safety: ReexecutionSafety,
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.safety = safety
+        #: Structured extras for a pre-prompt timeout (stage / budget / elapsed); never includes prompt text.
+        self.details = details
 
 
 class ACPSession:
@@ -110,6 +120,9 @@ class ACPSession:
         sandbox_root: str | None = None,
         resume_session_id: str | None = None,
         handshake_timeout_s: float | None = None,
+        pre_prompt_timeout_s: float | None = None,
+        pre_prompt_total_budget_s: float | None = None,
+        pre_prompt_elapsed_s: float = 0.0,
     ) -> None:
         self._descriptor = descriptor
         self._policy = policy
@@ -120,6 +133,20 @@ class ACPSession:
         self._handshake_timeout = (
             handshake_timeout_s if handshake_timeout_s is not None else descriptor.handshake_timeout_s
         )
+        # * Overall pre-prompt deadline (sandbox is timed by the caller): covers spawn through model/effort
+        # selection and ends before prompt. ``None`` keeps the legacy per-stage handshake timeouts only
+        # (conformance probes / non-delegation callers). Distinct from the post-prompt ``timeout_s``.
+        self._pre_prompt_timeout = pre_prompt_timeout_s
+        # The configured total stays distinct from the slice left after sandbox preparation, so an outcome
+        # reports the caller's actual budget rather than an implementation-detail remainder.
+        self._pre_prompt_total_budget = (
+            pre_prompt_total_budget_s if pre_prompt_total_budget_s is not None else pre_prompt_timeout_s
+        )
+        # Sandbox time belongs to the same deadline, but semaphore queue time does not. A sandboxed caller
+        # carries its elapsed preparation forward while starting this session's timer only after acquisition.
+        self._pre_prompt_elapsed_before_session = pre_prompt_elapsed_s
+        self._pre_prompt_stage = "spawn"
+        self._pre_prompt_started: float | None = None
         # Resume a prior agent session over ACP (``session/load``) instead of creating a fresh one
         # (``session/new``): the opaque id from an earlier turn's result, round-tripped back so the agent
         # reloads that conversation. ``None`` is the default fresh-session path. Gated at open() on the agent
@@ -252,6 +279,55 @@ class ACPSession:
         """The agent's session id once opened, for provenance and a later resume; ``None`` before open."""
         return self._session_id
 
+    def _trace_paths(self) -> dict[str, str]:
+        """Safe path leaves for stderr (cwd / sandbox root); never full absolute paths."""
+        paths: dict[str, str] = {}
+        cwd_leaf = path_leaf(self._cwd)
+        if cwd_leaf is not None:
+            paths["cwd_leaf"] = cwd_leaf
+        sandbox_leaf = path_leaf(self._sandbox_root)
+        if sandbox_leaf is not None:
+            paths["sandbox_leaf"] = sandbox_leaf
+        return paths
+
+    def _trace_launch(self) -> dict[str, str] | None:
+        """Basename of launch argv[0] only -- never raw argv or extra args."""
+        if not self._launch_argv:
+            return None
+        command = launch_command_basename(self._launch_argv[0])
+        return {"command": command} if command else None
+
+    def _trace_open_stage(self, stage: str, phase: str, *, status: str | None = None, **fields: object) -> None:
+        """Emit an ACP open-path lifecycle record with session correlation fields."""
+        payload: dict[str, object] = {
+            "status": status,
+            "pid": self._pid,
+            "session_id": self._session_id,
+            "paths": self._trace_paths() or None,
+            "launch": self._trace_launch(),
+            "sandbox": {"active": True} if self._sandbox_root is not None else None,
+        }
+        payload.update(fields)
+        acp_trace(stage, phase, **payload)  # type: ignore[arg-type]
+
+    def _trace_handshake_error(self, exc: ACPHandshakeError) -> dict[str, object]:
+        """Structured error payload for stderr: code + safety + stage; never raw exception text."""
+        payload: dict[str, object] = {
+            "code": exc.code.value,
+            "reexecution_safety": exc.safety.value,
+        }
+        if exc.details:
+            stage = exc.details.get("stage")
+            if isinstance(stage, str):
+                payload["stage"] = stage
+            budget = exc.details.get("budget_s")
+            if isinstance(budget, (int, float)):
+                payload["budget_s"] = float(budget)
+            elapsed = exc.details.get("elapsed_s")
+            if isinstance(elapsed, (int, float)):
+                payload["elapsed_s"] = float(elapsed)
+        return payload
+
     @property
     def available_models(self) -> list[str]:
         """The models the agent advertised at open across BOTH ACP model channels: the ``session.models``
@@ -284,7 +360,62 @@ class ACPSession:
         await self.close()
 
     async def open(self) -> None:
-        """Spawn the agent and complete the handshake, or raise :class:`ACPHandshakeError`."""
+        """Spawn the agent and complete the handshake, or raise :class:`ACPHandshakeError`.
+
+        When ``pre_prompt_timeout_s`` was set, the whole open (spawn through model/effort selection) is
+        bounded by that deadline and times out as ``ACP_PRE_PROMPT_TIMEOUT`` (SAFE, no partial). Per-stage
+        ``handshake_timeout_s`` limits still apply inside the overall budget. Without a pre-prompt deadline
+        the legacy per-stage behavior is unchanged.
+        """
+        if self._pre_prompt_timeout is None:
+            try:
+                await self._open_body()
+            except asyncio.CancelledError:
+                self._trace_open_stage("cancelled", "exit", status="cancelled")
+                raise
+            return
+        self._pre_prompt_started = time.monotonic()
+        self._pre_prompt_stage = "spawn"
+        try:
+            async with asyncio.timeout(self._pre_prompt_timeout):
+                await self._open_body()
+        except asyncio.CancelledError:
+            self._trace_open_stage("cancelled", "exit", status="cancelled")
+            raise
+        except TimeoutError as exc:
+            await self.close()
+            elapsed = (
+                round(self._pre_prompt_elapsed_before_session + time.monotonic() - self._pre_prompt_started, 3)
+                if self._pre_prompt_started is not None
+                else self._pre_prompt_elapsed_before_session
+            )
+            # * Human text must quote the configured total budget (same as details.budget_s), not the
+            # remaining open slice left after sandbox preparation.
+            total_budget = (
+                self._pre_prompt_total_budget if self._pre_prompt_total_budget is not None else self._pre_prompt_timeout
+            )
+            handshake_error = ACPHandshakeError(
+                ErrorCode.ACP_PRE_PROMPT_TIMEOUT,
+                f"{self._descriptor.id} did not become prompt-ready within "
+                f"{_format_timeout_s(total_budget)}s (stage={self._pre_prompt_stage})",
+                ReexecutionSafety.SAFE,
+                details={
+                    "stage": self._pre_prompt_stage,
+                    "budget_s": total_budget,
+                    "elapsed_s": elapsed,
+                },
+            )
+            self._trace_open_stage(
+                self._pre_prompt_stage,
+                "exit",
+                status="failed",
+                error=self._trace_handshake_error(handshake_error),
+                timing={"elapsed_s": elapsed, "budget_s": total_budget},
+            )
+            raise handshake_error from exc
+
+    async def _open_body(self) -> None:
+        """Spawn the agent and complete the handshake stages (the body of :meth:`open`)."""
         # Layer this turn's effort override onto the launch: extra env on top of the resolved environment, and
         # extra args appended to the agent's own argv (e.g. cline's ``--thinking high``). A model-id-encoding
         # agent without :attr:`AgentDescriptor.model_launch_flag` (codex) carries its effort in
@@ -314,6 +445,9 @@ class ACPSession:
                 if entry is not None:
                     self._journal.append(entry)
 
+        self._pre_prompt_stage = "spawn"
+        spawn_started = time.monotonic()
+        self._trace_open_stage("spawn", "enter", launch={"command": launch_command_basename(command)})
         try:
             conn, process = await self._stack.enter_async_context(
                 spawn_agent_process(
@@ -331,13 +465,29 @@ class ACPSession:
             # that resolves to a file (NotADirectoryError) or an unexecutable command (PermissionError) is
             # also a launch failure, not an internal error. All map to a clean re-execution-safe spawn fail.
             await self.close()
-            raise ACPHandshakeError(
+            spawn_error = ACPHandshakeError(
                 ErrorCode.ACP_SPAWN_FAILED,
                 f"could not launch {self._descriptor.id} ({command!r}): {exc}",
                 ReexecutionSafety.SAFE,
-            ) from exc
+            )
+            self._trace_open_stage(
+                "spawn",
+                "exit",
+                status="failed",
+                error=self._trace_handshake_error(spawn_error),
+                timing={"stage_elapsed_s": round(time.monotonic() - spawn_started, 3)},
+                launch={"command": launch_command_basename(command)},
+            )
+            raise spawn_error from exc
         self._conn = conn
         self._pid = process.pid
+        self._trace_open_stage(
+            "spawn",
+            "exit",
+            status="ok",
+            timing={"stage_elapsed_s": round(time.monotonic() - spawn_started, 3)},
+            launch={"command": launch_command_basename(command)},
+        )
         # A cancellation ANYWHERE in the handshake (initialize / new_session / load / set_model) is a
         # BaseException, so the per-stage ``except Exception`` guards below do NOT catch it. Without this outer
         # guard the just-spawned agent would be left registered on the exit stack but never torn down -- a
@@ -346,25 +496,61 @@ class ACPSession:
         # re-raise so the cancellation still propagates (the per-stage handlers already close on an Exception).
         try:
             try:
+                self._pre_prompt_stage = "initialize"
+                init_started = time.monotonic()
+                self._trace_open_stage("initialize", "enter")
                 init = await asyncio.wait_for(
                     conn.initialize(protocol_version=PROTOCOL_VERSION, client_info=_CLIENT_INFO),
                     timeout=self._handshake_timeout,
                 )
+                self._trace_open_stage(
+                    "initialize",
+                    "exit",
+                    status="ok",
+                    timing={"stage_elapsed_s": round(time.monotonic() - init_started, 3)},
+                )
             except Exception as exc:
                 await self.close()
-                raise ACPHandshakeError(
+                handshake_error = ACPHandshakeError(
                     ErrorCode.ACP_HANDSHAKE_FAILED,
                     f"ACP handshake with {self._descriptor.id} failed: {exc}",
                     ReexecutionSafety.SAFE,
-                ) from exc
+                )
+                self._trace_open_stage(
+                    "initialize",
+                    "exit",
+                    status="failed",
+                    error=self._trace_handshake_error(handshake_error),
+                    timing={"stage_elapsed_s": round(time.monotonic() - init_started, 3)},
+                )
+                raise handshake_error from exc
             # Resume a prior session (session/load) when asked, else create a fresh one (session/new). The
             # resume path is gated on the agent's advertised loadSession capability and fails RESUME_FAILED if
             # unsupported.
             session: NewSessionResponse | LoadSessionResponse
-            if self._resume_session_id is not None:
-                session = await self._resume(conn, init)
-            else:
-                session = await self._new_session(conn)
+            self._pre_prompt_stage = "session"
+            session_started = time.monotonic()
+            self._trace_open_stage("session", "enter")
+            try:
+                if self._resume_session_id is not None:
+                    session = await self._resume(conn, init)
+                else:
+                    session = await self._new_session(conn)
+            except ACPHandshakeError as exc:
+                self._trace_open_stage(
+                    "session",
+                    "exit",
+                    status="failed",
+                    error=self._trace_handshake_error(exc),
+                    timing={"stage_elapsed_s": round(time.monotonic() - session_started, 3)},
+                )
+                raise
+            self._trace_open_stage(
+                "session",
+                "exit",
+                status="ok",
+                timing={"stage_elapsed_s": round(time.monotonic() - session_started, 3)},
+            )
             # * Legacy SessionModelState (session.models) is optional: ACP SDK 0.11+ removes the field; access
             # only via defensive helpers so a config-only response never AttributeErrors before launch validation.
             self._available_models = _models_of(session)
@@ -380,10 +566,47 @@ class ACPSession:
             # initialize / _new_session / _resume steps already close on their own faults; this guards the
             # post-session-open steps, which under the confirmed-selection contract are no longer best-effort.
             try:
+                self._pre_prompt_stage = "model_selection"
+                model_started = time.monotonic()
+                self._trace_open_stage("model_selection", "enter")
                 await self._select_model(conn, session)
+                self._trace_open_stage(
+                    "model_selection",
+                    "exit",
+                    status="ok",
+                    timing={"stage_elapsed_s": round(time.monotonic() - model_started, 3)},
+                )
+                self._pre_prompt_stage = "effort_selection"
+                effort_started = time.monotonic()
+                self._trace_open_stage("effort_selection", "enter")
                 await self._select_effort(conn)
-            except Exception:
+                self._trace_open_stage(
+                    "effort_selection",
+                    "exit",
+                    status="ok",
+                    timing={"stage_elapsed_s": round(time.monotonic() - effort_started, 3)},
+                )
+            except Exception as exc:
                 await self.close()
+                if isinstance(exc, ACPHandshakeError):
+                    self._trace_open_stage(
+                        self._pre_prompt_stage,
+                        "exit",
+                        status="failed",
+                        error=self._trace_handshake_error(exc),
+                    )
+                else:
+                    # * Safe structured code only -- never raw exception text on stderr.
+                    self._trace_open_stage(
+                        self._pre_prompt_stage,
+                        "exit",
+                        status="failed",
+                        error={
+                            "code": ErrorCode.INTERNAL.value,
+                            "stage": self._pre_prompt_stage,
+                            "category": "setup_failed",
+                        },
+                    )
                 raise
         except asyncio.CancelledError:
             await self.close()
@@ -619,52 +842,99 @@ class ACPSession:
         # keeping the peak descendant count -- a FLOOR for how many agents this voice spun up. Started here
         # and always stopped in the finally, so a timeout/error path still records what it saw before the cut.
         sampler = asyncio.create_task(self._sample_observed_agents())
+        heartbeat = PromptHeartbeat(timeout_s=timeout_s, pid=self._pid, session_id=self._session_id)
+        self._trace_open_stage(
+            "prompt",
+            "enter",
+            status="accepted",
+            timing={"timeout_s": timeout_s},
+            message="prompt accepted; awaiting outcome",
+        )
+        await heartbeat.start()
         try:
-            response = await asyncio.wait_for(
-                self._conn.prompt(prompt=blocks, session_id=self._session_id),
-                timeout=timeout_s,
-            )
-        except TimeoutError:
-            await self.cancel()
-            return self._stamp(
-                _failed(
-                    self._target,
-                    self._policy,
-                    start,
-                    ErrorCode.ACP_TURN_TIMEOUT,
-                    f"{self._descriptor.id} did not finish within {timeout_s:.0f}s",
-                    _post_prompt_safety(self._journal),
-                    partial=self._journal.message_text() or None,
+            try:
+                response = await asyncio.wait_for(
+                    self._conn.prompt(prompt=blocks, session_id=self._session_id),
+                    timeout=timeout_s,
                 )
-            )
-        except Exception as exc:
-            return self._stamp(
-                _failed(
-                    self._target,
-                    self._policy,
-                    start,
-                    ErrorCode.ACP_TURN_ERROR,
-                    f"ACP turn for {self._descriptor.id} failed: {exc}",
-                    ReexecutionSafety.AMBIGUOUS,
+            except TimeoutError:
+                await self.cancel()
+                result = self._stamp(
+                    _failed(
+                        self._target,
+                        self._policy,
+                        start,
+                        ErrorCode.ACP_TURN_TIMEOUT,
+                        f"{self._descriptor.id} did not finish within {timeout_s:.0f}s",
+                        _post_prompt_safety(self._journal),
+                        partial=self._journal.message_text() or None,
+                    )
                 )
+                self._trace_finish(result, start, timeout_s=timeout_s)
+                return result
+            except asyncio.CancelledError:
+                self._trace_open_stage(
+                    "cancelled",
+                    "exit",
+                    status="cancelled",
+                    timing={"elapsed_s": round(time.monotonic() - start, 3), "timeout_s": timeout_s},
+                )
+                raise
+            except Exception as exc:
+                result = self._stamp(
+                    _failed(
+                        self._target,
+                        self._policy,
+                        start,
+                        ErrorCode.ACP_TURN_ERROR,
+                        f"ACP turn for {self._descriptor.id} failed: {exc}",
+                        ReexecutionSafety.AMBIGUOUS,
+                    )
+                )
+                self._trace_finish(result, start, timeout_s=timeout_s)
+                return result
+            result = _reduce(
+                self._descriptor,
+                self._target,
+                self._policy,
+                self._journal,
+                response,
+                self._session_id,
+                start,
+                model_confirmed=self._model_confirmed,
             )
+            stamped = self._stamp(result)
+            self._trace_finish(stamped, start, timeout_s=timeout_s)
+            return stamped
         finally:
-            # Stop the sampler and fold its final reading in, so even a timeout/error path records the peak it
-            # saw. Cancel-then-await keeps no sampler task dangling on the loop. Best-effort: never raises.
+            # Stop heartbeat then sampler so neither helper leaks on success / failure / cancel / timeout.
+            await heartbeat.stop()
             sampler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sampler
-        result = _reduce(
-            self._descriptor,
-            self._target,
-            self._policy,
-            self._journal,
-            response,
-            self._session_id,
-            start,
-            model_confirmed=self._model_confirmed,
+
+    def trace_turn_finish(self, result: DelegationResult, start: float, *, timeout_s: float | None = None) -> None:
+        """Emit a terminal ``finish`` lifecycle record (handshake or prompt); no answer/partial text."""
+        self._trace_finish(result, start, timeout_s=timeout_s)
+
+    def _trace_finish(self, result: DelegationResult, start: float, *, timeout_s: float | None = None) -> None:
+        """Emit the terminal ``finish`` lifecycle record for one turn (no answer/partial text)."""
+        error_payload: dict[str, object] | None = None
+        if result.error is not None:
+            error_payload = {"code": result.error.code.value}
+            if result.error.reexecution_safety is not None:
+                error_payload["reexecution_safety"] = result.error.reexecution_safety.value
+        self._trace_open_stage(
+            "finish",
+            "exit",
+            status="ok" if result.ok else "failed",
+            error=error_payload,
+            timing={
+                "elapsed_s": round(time.monotonic() - start, 3),
+                "timeout_s": timeout_s,
+                "duration_s": result.duration_s,
+            },
         )
-        return self._stamp(result)
 
     async def _sample_observed_agents(self) -> None:
         """Poll the agent's process tree on a coarse timer, keeping the peak descendant count (N1, item 3).
@@ -752,6 +1022,9 @@ async def run_acp_turn(
     parent_run_id: str | None = None,
     sandbox_root: str | None = None,
     resume_session_id: str | None = None,
+    pre_prompt_timeout_s: float | None = None,
+    pre_prompt_total_budget_s: float | None = None,
+    pre_prompt_elapsed_s: float = 0.0,
 ) -> DelegationResult:
     """Open a one-shot session, run a single prompt turn, and return the normalized result.
 
@@ -761,9 +1034,13 @@ async def run_acp_turn(
     the agent's environment so a Rutherford-driving-Rutherford chain is bounded. ``sandbox_root`` confines the
     agent's file/terminal callbacks to an isolated worktree / copy for a mutating run. ``resume_session_id``
     resumes a prior agent session (ACP ``session/load``) instead of opening a fresh one, where the agent
-    supports it -- otherwise the turn fails ``RESUME_FAILED``. Never raises for an operational failure; a
-    handshake / spawn / resume failure becomes a failed :class:`DelegationResult` (re-execution-safe), still
-    carrying the requested effort.
+    supports it -- otherwise the turn fails ``RESUME_FAILED``. ``pre_prompt_timeout_s`` bounds open
+    (spawn through model/effort selection) separately from ``timeout_s`` (the running prompt only); ``None``
+    keeps the legacy per-stage handshake timeouts. A sandbox caller passes its original
+    ``pre_prompt_total_budget_s`` and sandbox ``pre_prompt_elapsed_s`` alongside the remaining open budget so
+    a timeout reports its configured budget and total non-queue elapsed time. Never raises for an operational
+    failure; a handshake / spawn / resume / pre-prompt-timeout failure becomes a failed
+    :class:`DelegationResult` (re-execution-safe), still carrying the requested effort.
     """
     start = time.monotonic()
     session = ACPSession(
@@ -776,17 +1053,21 @@ async def run_acp_turn(
         parent_run_id=parent_run_id,
         sandbox_root=sandbox_root,
         resume_session_id=resume_session_id,
+        pre_prompt_timeout_s=pre_prompt_timeout_s,
+        pre_prompt_total_budget_s=pre_prompt_total_budget_s,
+        pre_prompt_elapsed_s=pre_prompt_elapsed_s,
     )
     try:
         async with session:
             return await session.prompt(prompt, timeout_s=timeout_s)
     except ACPHandshakeError as exc:
-        result = _failed(session.target, policy, start, exc.code, exc.message, exc.safety)
+        result = _failed(session.target, policy, start, exc.code, exc.message, exc.safety, details=exc.details)
         result.effort = effort
         result.effort_applied = session.effort_applied
         result.argv = session.launch_argv  # F2: a spawn-failed leaf still records the argv it tried
         result.requested_model = session.requested_model
         result.selected_model = session.selected_model
+        session.trace_turn_finish(result, start)
         return result
 
 
@@ -850,13 +1131,14 @@ def _failed(
     *,
     partial: str | None = None,
     cost: Cost | None = None,
+    details: dict[str, object] | None = None,
 ) -> DelegationResult:
     """Build a failed result carrying the ACP error code and its re-execution-safety classification."""
     return DelegationResult(
         target=target,
         ok=False,
         duration_s=round(time.monotonic() - start, 3),
-        error=ErrorInfo(code=code, message=message, reexecution_safety=safety),
+        error=ErrorInfo(code=code, message=message, details=details, reexecution_safety=safety),
         partial=partial,
         cost=cost,
         safety_mode=policy.mode,
@@ -870,6 +1152,11 @@ def _post_prompt_safety(journal: EventJournal) -> ReexecutionSafety:
     if journal.saw_tool_activity():
         return ReexecutionSafety.AMBIGUOUS
     return ReexecutionSafety.DUPLICATE_COST
+
+
+def _format_timeout_s(value: float) -> str:
+    """Render a timeout for human messages without rounding a sub-second budget to ``0``."""
+    return f"{value:g}"
 
 
 def _resolve_env(descriptor: AgentDescriptor) -> dict[str, str]:

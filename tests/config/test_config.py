@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from rutherford.config.loader import deep_merge, default_global_config_path, has_project_config, load_config
 from rutherford.config.schema import AgentConfig, RutherfordConfig
@@ -23,20 +24,29 @@ def test_load_defaults(tmp_path: Path) -> None:
     config = load_config(env=_iso_env(tmp_path), cwd=tmp_path)
     assert config.default_safety_mode is SafetyMode.READ_ONLY
     assert config.default_timeout_s == 300.0
+    assert config.default_pre_prompt_timeout_s == 90.0
+    assert config.acp_prompt_heartbeat_s == 30.0
 
 
 def test_load_project_override(tmp_path: Path) -> None:
     (tmp_path / "rutherford.toml").write_text(
-        'default_timeout_s = 12.0\ndefault_safety_mode = "propose"\n\n[agents.goose]\ndefault_model = "gpt"\n'
-        "timeout_s = 9.0\n",
+        "default_timeout_s = 12.0\ndefault_pre_prompt_timeout_s = 15.0\n"
+        'default_safety_mode = "propose"\n\n[agents.goose]\ndefault_model = "gpt"\n'
+        "timeout_s = 9.0\npre_prompt_timeout_s = 7.0\n",
         encoding="utf-8",
     )
     config = load_config(env=_iso_env(tmp_path), cwd=tmp_path)
     assert config.default_timeout_s == 12.0
+    assert config.default_pre_prompt_timeout_s == 15.0
     assert config.default_safety_mode is SafetyMode.PROPOSE
     assert config.default_model_for("goose") == "gpt"
     assert config.timeout_for("goose") == 9.0
+    assert config.pre_prompt_timeout_for("goose") == 7.0
+    assert config.resolve_pre_prompt_timeout_s("goose") == 7.0
+    assert config.resolve_pre_prompt_timeout_s("missing") == 15.0
+    assert config.resolve_pre_prompt_timeout_s("goose", override=3.0) == 3.0
     assert config.timeout_for("missing") is None
+    assert config.pre_prompt_timeout_for("missing") is None
 
 
 @pytest.mark.parametrize("name", ["rutherford.toml", ".rutherford.toml", ".rutherford/config.toml"])
@@ -78,12 +88,16 @@ def test_env_overrides(tmp_path: Path) -> None:
     env = _iso_env(tmp_path) | {
         "RUTHERFORD_MAX_DEPTH": "7",
         "RUTHERFORD_DEFAULT_TIMEOUT_S": "20",
+        "RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S": "11",
+        "RUTHERFORD_ACP_PROMPT_HEARTBEAT_S": "0",
         "RUTHERFORD_DEFAULT_SAFETY": "write",
         "RUTHERFORD_TRUSTED_WORKSPACES": str(tmp_path),
     }
     config = load_config(env=env, cwd=tmp_path)
     assert config.max_depth == 7
     assert config.default_timeout_s == 20.0
+    assert config.default_pre_prompt_timeout_s == 11.0
+    assert config.acp_prompt_heartbeat_s == 0.0
     assert config.default_safety_mode is SafetyMode.WRITE
     with pytest.raises(ConfigError):
         load_config(env=_iso_env(tmp_path) | {"RUTHERFORD_MAX_DEPTH": "notint"}, cwd=tmp_path)
@@ -94,6 +108,15 @@ def test_global_config_path_and_deep_merge() -> None:
     assert "rutherford" in str(default_global_config_path({"XDG_CONFIG_HOME": "/tmp"}))
     merged = deep_merge({"a": {"b": 1}}, {"a": {"c": 2}, "d": 3})
     assert merged == {"a": {"b": 1, "c": 2}, "d": 3}
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_pre_prompt_timeout_rejects_non_positive_config_values(value: float) -> None:
+    """Schema rejects non-positive global and per-agent pre-prompt deadlines."""
+    with pytest.raises(ValidationError):
+        RutherfordConfig(default_pre_prompt_timeout_s=value)
+    with pytest.raises(ValidationError):
+        AgentConfig(pre_prompt_timeout_s=value)
 
 
 def test_schema_helpers() -> None:

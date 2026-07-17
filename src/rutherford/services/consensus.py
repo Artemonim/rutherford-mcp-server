@@ -31,7 +31,16 @@ from ..acp.descriptors import DescriptorRegistry
 from ..acp.permission import PermissionPolicy
 from ..acp.session import ACPHandshakeError, ACPSession, run_acp_turn
 from ..config.schema import RutherfordConfig
-from ..domain.enums import EFFORT_ORDER, ActivityEventKind, Effort, SafetyMode, Stance, Strategy, runs_sandboxed
+from ..domain.enums import (
+    EFFORT_ORDER,
+    ActivityEventKind,
+    Effort,
+    ReexecutionSafety,
+    SafetyMode,
+    Stance,
+    Strategy,
+    runs_sandboxed,
+)
 from ..domain.error_codes import ErrorCode
 from ..domain.errors import RutherfordError
 from ..domain.models import (
@@ -57,6 +66,7 @@ from ..domain.models import (
     VoiceVerdict,
 )
 from ..io.ledger import RunLedger
+from ..runtime.acp_trace import acp_trace, bind_acp_trace
 from ..runtime.depth import ensure_within_aggregate_cap
 from .delegation import ActivityCallback, DelegationService, PanelLifecycle, emit_activity
 from .persistence import PanelVoice, render_panel_voice_files, write_panel_record
@@ -458,6 +468,7 @@ class ConsensusService:
             role=target.role or req.role,
             safety_mode=req.safety_mode,
             timeout_s=req.timeout_s,
+            pre_prompt_timeout_s=req.pre_prompt_timeout_s,
             # F8a: a per-seat effort pins THIS voice's tier; else the call-level effort flows to every voice.
             effort=_seat_effort(target, req.effort),
             # item 9 panel continuation: resume this seat's prior session where one was recorded.
@@ -494,6 +505,7 @@ class ConsensusService:
                 effort=self._delegation.resolve_effort(target.cli, _seat_effort(target, req.effort)),
                 base_depth=base_depth,
                 resume_session_id=_resume_id(req, index),  # item 9: resume this seat under a budget too
+                pre_prompt_timeout_s=self._config.resolve_pre_prompt_timeout_s(target.cli, req.pre_prompt_timeout_s),
             )
             if self._descriptors.has(target.cli)
             else None
@@ -579,15 +591,44 @@ class ConsensusService:
             return _fail_voice(
                 target, req, ErrorCode.UNKNOWN_TARGET, f"unknown agent id {target.cli!r}; known: {known}"
             )
+        with bind_acp_trace(
+            correlation_id=f"voice:{index}",
+            tool="consensus",
+            cli=target.cli,
+            model=target.model,
+            depth=base_depth,
+            heartbeat_s=self._config.acp_prompt_heartbeat_s,
+        ):
+            return await self._budget_turn_body(req, index, target, session, timeout_s, base_depth, on_activity)
+
+    async def _budget_turn_body(
+        self,
+        req: ConsensusRequest,
+        index: int,
+        target: Target,
+        session: ACPSession,
+        timeout_s: float,
+        base_depth: int,
+        on_activity: ActivityCallback | None,
+    ) -> DelegationResult:
+        """Body of :meth:`_budget_turn` under an active ACP trace bind (open before queue)."""
+        open_started = time.monotonic()
         try:
             await session.open()
         except ACPHandshakeError as exc:
-            result = _fail_voice(target, req, exc.code, exc.message)
+            result = _fail_voice(target, req, exc.code, exc.message, safety=exc.safety, details=exc.details)
             result.effort = req.effort
             result.effort_applied = session.effort_applied
+            if result.error is not None:
+                self._delegation.record_error_health(target.cli, result.error)
+            session.trace_turn_finish(result, open_started)
             self._emit_voice_finished(on_activity, index, result, target, req, base_depth)
             return result
+        queue_started = time.monotonic()
+        acp_trace("queue", "enter")
         async with self._delegation.semaphore:
+            wait_s = round(time.monotonic() - queue_started, 3)
+            acp_trace("queue", "exit", status="ok", timing={"wait_s": wait_s})
             emit_activity(
                 on_activity,
                 ActivityEvent(
@@ -602,6 +643,7 @@ class ConsensusService:
                 ),
             )
             result = await session.prompt(self._voice_prompt(req, target, index), timeout_s=timeout_s)
+        self._delegation.record_health(target.cli, result)
         self._emit_voice_finished(on_activity, index, result, target, req, base_depth)
         return result
 
@@ -1017,16 +1059,30 @@ class ConsensusService:
                 message=f"{voter.label} ranking started",
             ),
         )
-        async with self._delegation.semaphore:
-            result = await run_acp_turn(
-                descriptor,
-                prompt,
-                policy=PermissionPolicy(SafetyMode.READ_ONLY),
-                cwd=cwd,
-                timeout_s=timeout_s,
-                model=voter.model,
-                base_depth=base_depth + 1,
-            )
+        with bind_acp_trace(
+            correlation_id=f"rank:{voter.pos}",
+            tool="consensus",
+            cli=voter.cli,
+            model=voter.model,
+            depth=base_depth,
+            heartbeat_s=self._config.acp_prompt_heartbeat_s,
+        ):
+            queue_started = time.monotonic()
+            acp_trace("queue", "enter")
+            async with self._delegation.semaphore:
+                wait_s = round(time.monotonic() - queue_started, 3)
+                acp_trace("queue", "exit", status="ok", timing={"wait_s": wait_s})
+                result = await run_acp_turn(
+                    descriptor,
+                    prompt,
+                    policy=PermissionPolicy(SafetyMode.READ_ONLY),
+                    cwd=cwd,
+                    timeout_s=timeout_s,
+                    model=voter.model,
+                    base_depth=base_depth + 1,
+                    pre_prompt_timeout_s=self._config.resolve_pre_prompt_timeout_s(voter.cli, req.pre_prompt_timeout_s),
+                )
+        self._delegation.record_health(voter.cli, result)
         emit_activity(
             on_activity,
             ActivityEvent(
@@ -1172,15 +1228,25 @@ class ConsensusService:
         timeout_s = req.timeout_s or self._config.default_timeout_s
         # The synthesis is a nested delegation, so it runs one level deeper -- a Rutherford-host judge stays
         # bounded by the depth guard rather than being treated as a fresh top-level call.
-        result = await run_acp_turn(
-            descriptor,
-            prompt,
-            policy=PermissionPolicy(SafetyMode.READ_ONLY),
-            cwd=cwd,
-            timeout_s=timeout_s,
+        with bind_acp_trace(
+            correlation_id="synthesize:0",
+            tool="consensus",
+            cli=judge.cli,
             model=judge.model,
-            base_depth=base_depth + 1,
-        )
+            depth=base_depth + 1,
+            heartbeat_s=self._config.acp_prompt_heartbeat_s,
+        ):
+            result = await run_acp_turn(
+                descriptor,
+                prompt,
+                policy=PermissionPolicy(SafetyMode.READ_ONLY),
+                cwd=cwd,
+                timeout_s=timeout_s,
+                model=judge.model,
+                base_depth=base_depth + 1,
+                pre_prompt_timeout_s=self._config.resolve_pre_prompt_timeout_s(judge.cli, req.pre_prompt_timeout_s),
+            )
+        self._delegation.record_health(judge.cli, result)
         if not result.ok or not result.text.strip():
             return None, None, False
         return result.text, judge.display_label, self_authored
@@ -1254,12 +1320,20 @@ def _anon_labels(count: int) -> list[str]:
     return [string.ascii_uppercase[index] if index < 26 else f"L{index + 1}" for index in range(count)]
 
 
-def _fail_voice(target: Target, req: ConsensusRequest, code: ErrorCode, message: str) -> DelegationResult:
+def _fail_voice(
+    target: Target,
+    req: ConsensusRequest,
+    code: ErrorCode,
+    message: str,
+    *,
+    safety: ReexecutionSafety | None = None,
+    details: dict[str, object] | None = None,
+) -> DelegationResult:
     """A failed voice from an up-front guard (unknown agent, handshake failure) in the budgeted path."""
     return DelegationResult(
         target=Target(cli=target.cli, model=target.model),
         ok=False,
-        error=ErrorInfo(code=code, message=message),
+        error=ErrorInfo(code=code, message=message, details=details, reexecution_safety=safety),
         safety_mode=req.safety_mode,
     )
 

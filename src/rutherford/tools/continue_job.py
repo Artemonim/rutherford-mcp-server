@@ -63,6 +63,7 @@ async def continue_job_tool(
     files: list[str] | None = None,
     safety_mode: str | None = None,
     timeout_s: float | None = None,
+    pre_prompt_timeout_s: float | None = None,
     trust_workspace: bool = False,
     role: str | None = None,
     effort: str | None = None,
@@ -81,8 +82,11 @@ async def continue_job_tool(
     agent cannot reload its ACP session is recorded as a failed voice, never silently dropped. The
     continuation persists as a fresh run linked to the parent (``continued_from``); it never mutates the
     parent (9-B). The trust gate is fresh and defaults to ``read_only`` -- the parent's write mode is NOT
-    inherited (9-D); panels are read-only deliberation regardless. ``mode="async"`` runs it as a background
-    job and returns a ``job_id``.
+    inherited (9-D); panels are read-only deliberation regardless. ``timeout_s`` bounds a running prompt after
+    acceptance; ``pre_prompt_timeout_s`` is separate and bounds sandbox prep when applicable, spawn, handshake,
+    and model/effort selection — it ends before prompt acceptance; when omitted, it resolves through the
+    per-agent or global ``default_pre_prompt_timeout_s`` (90s); semaphore queue wait does not consume it.
+    ``mode="async"`` runs it as a background job and returns a ``job_id``.
     """
     parent = _read_parent(app, job_id)
     safety = resolve_safety_mode(safety_mode, SafetyMode.READ_ONLY)  # 9-D: read_only default, not parent/config
@@ -107,6 +111,7 @@ async def continue_job_tool(
             effort=resolved_effort,
             persist=persist,
             parent=parent,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
         )
 
         async def run(on_activity: ActivityCallback | None = None) -> str:
@@ -131,6 +136,7 @@ async def continue_job_tool(
             timeout_s,
             rounds,
             persist,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
         )
 
         async def run(on_activity: ActivityCallback | None = None) -> str:
@@ -178,6 +184,8 @@ def _panel_continuation_request(
     timeout_s: float | None,
     rounds: int,
     persist: bool,
+    *,
+    pre_prompt_timeout_s: float | None = None,
 ) -> ConsensusRequest | DebateRequest:
     """Rebuild a consensus / debate request from a persisted panel, with each seat's resume handle threaded in.
 
@@ -213,6 +221,7 @@ def _panel_continuation_request(
             safety_mode=safety,
             effort=effort,
             timeout_s=timeout_s,
+            pre_prompt_timeout_s=pre_prompt_timeout_s,
             resume_session_ids=resume_session_ids,
             continued_from=job_id,
             persist=persist,
@@ -229,6 +238,7 @@ def _panel_continuation_request(
         safety_mode=safety,
         effort=effort,
         timeout_s=timeout_s,
+        pre_prompt_timeout_s=pre_prompt_timeout_s,
         resume_session_ids=resume_session_ids,
         continued_from=job_id,
         persist=persist,
@@ -254,6 +264,7 @@ class _ContinuationPlan:
         effort: Effort | None,
         persist: bool,
         parent: RunRecord,
+        pre_prompt_timeout_s: float | None = None,
     ) -> None:
         self._app = app
         self._job_id = job_id
@@ -264,6 +275,7 @@ class _ContinuationPlan:
         self._role = role
         self._safety = safety
         self._timeout_s = timeout_s
+        self._pre_prompt_timeout_s = pre_prompt_timeout_s
         self._trust_workspace = trust_workspace
         self._effort = effort
         self._persist = persist
@@ -303,6 +315,7 @@ class _ContinuationPlan:
             role=self._role,
             safety_mode=self._safety,
             timeout_s=self._timeout_s,
+            pre_prompt_timeout_s=self._pre_prompt_timeout_s,
             trust_workspace=self._trust_workspace,
             effort=self._effort,
             persist=self._persist,

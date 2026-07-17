@@ -127,6 +127,11 @@ class Sandbox:
         """The agent's confined execution root (the worktree or the temp copy), as an absolute string."""
         return str(self._root)
 
+    @property
+    def is_git(self) -> bool:
+        """Whether this sandbox is a git worktree (``True``) or a temp-tree copy (``False``)."""
+        return self._is_git
+
     def finish(self, mode: SafetyMode) -> SandboxResult:
         """Compute the changed set, and for ``write`` / ``yolo`` apply it back to the real ``working_dir``.
 

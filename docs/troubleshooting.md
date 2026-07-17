@@ -87,6 +87,51 @@ Reconnect the MCP server (config is read once at start) and re-run `doctor agent
 **[Claude Code on Bedrock / enterprise wrappers](bedrock.md)** for the full mechanism and the approaches
 that do *not* work.
 
+### Sync call looks hung: no MCP progress for a long time
+
+`mode="sync"` (the default on `delegate` / `consensus` / `debate`) intentionally waits for the final
+result envelope and returns it on the same MCP request. For a single-agent `delegate`, there is no
+incremental MCP progress stream while the turn runs: the caller stays blocked until success, a
+structured failure, or the relevant deadline. A quiet tool call is therefore **not** evidence of
+failure, and it must **not** receive an arbitrary cancellation deadline shorter than the timeouts you
+passed (or the configured defaults).
+
+Two budgets apply in sequence; they are not interchangeable:
+
+| Phase | What it covers | Deadline | Failure code |
+| --- | --- | --- | --- |
+| Pre-prompt startup | sandbox prep, ACP spawn, initialize, session create/load, model/effort selection | `pre_prompt_timeout_s` / `default_pre_prompt_timeout_s` (default 90s) | `ACP_PRE_PROMPT_TIMEOUT` |
+| Running prompt | the accepted `session/prompt` turn only | `timeout_s` / `default_timeout_s` (default 300s) | `ACP_TURN_TIMEOUT` |
+
+After the prompt is accepted, silence up to `timeout_s` is expected: the agent may be reasoning, calling
+tools over ACP, or waiting on its own model provider. Rutherford does not scrape agent stdout for a
+"still alive" signal, and the MCP client UI is not required to show host-specific UI/IDE activity for a
+headless ACP child — none of that is a protocol guarantee.
+
+**What to do**
+
+- During startup, leave a sync call alone until the pre-prompt deadline expires. Only after the prompt
+  is accepted does the running-prompt `timeout_s` apply — do not wait on `timeout_s` while the turn
+  is still in pre-prompt. Abort earlier only with independent evidence the process is wedged (for
+  example the Rutherford server process itself is gone).
+- If you need non-blocking visibility or cancellation **before** you start, choose `mode="async"`.
+  The submit call returns `{job_id, status, tool}` immediately; then use `list_jobs` / `activity` /
+  `job_status` / `job_result` / `cancel_job`. See [recipes.md](recipes.md#kick-off-a-long-job-and-keep-working).
+- For local operator diagnostics, watch structured JSON logs on the Rutherford process **stderr**
+  (`log_level` / `log_format` / `acp_prompt_heartbeat_s` in [configuration.md](configuration.md)).
+  Each ACP turn emits `event=acp_lifecycle` records with a `stage` (`queue`, `sandbox`, `spawn`,
+  `initialize`, `session`, `model_selection`, `effort_selection`, `prompt`, `finish`, `cancelled`) and
+  `phase` (`enter` / `exit` / `heartbeat`). While a prompt is in flight, heartbeats repeat every
+  `acp_prompt_heartbeat_s` (default 30s; `0` disables) and only mean Rutherford is still awaiting the
+  prompt outcome — not that the model provider is live. Those lines are for the process operator only —
+  they are not MCP progress notifications and do not wake a sync caller.
+- A sync `consensus` / `debate` may emit best-effort MCP progress when the client supplied a
+  `progressToken` (panel voice completion). A sync `delegate` does not; absence of either is still
+  not a hang signal by itself.
+
+If the call eventually fails, use the code-specific sections below (`ACP_PRE_PROMPT_TIMEOUT`,
+`ACP_TURN_TIMEOUT`, spawn/handshake failures) rather than inventing a client-side abort policy.
+
 ### `ACP_TURN_TIMEOUT` — the turn exceeded its limit
 
 `ACPSession.prompt` wraps the turn in a timeout; on expiry it issues `session/cancel`, preserves any
@@ -100,6 +145,18 @@ process tree is reaped on close.
   `job_status` / `job_result`. The timeout still applies to the underlying turn.
 - A local model on CPU/iGPU is slow, and the first call is slowest (cold weight-load). Pre-load the
   model and give the agent a generous timeout. See [local-models.md](local-models.md).
+
+### `ACP_PRE_PROMPT_TIMEOUT` — not prompt-ready in time
+
+The hard pre-prompt deadline (`default_pre_prompt_timeout_s`, default 90s) covers sandbox prep, ACP
+spawn, initialize, session create/load, and model/effort selection — it ends before `session/prompt`.
+Expiry is `ACP_PRE_PROMPT_TIMEOUT`: re-execution-SAFE, no partial answer, unhealthy for cooldown.
+Semaphore queue wait does not consume this budget. Error `details` carry `stage`, `budget_s`, and
+`elapsed_s`.
+
+- Raise the per-call `pre_prompt_timeout_s`, or `[agents.<id>] pre_prompt_timeout_s` /
+  `default_pre_prompt_timeout_s` in config.
+- Check whether sandbox prep (large non-git copy) or a slow cold agent start is the stage in `details`.
 
 ### `hermes` is slow or times out intermittently
 
@@ -198,9 +255,11 @@ reported as a `ConfigError`, not a raw decode error.
 | --- | --- |
 | `ACP_SPAWN_FAILED` | Run `doctor`; install the agent (and its ACP shim); confirm it is on PATH. |
 | `ACP_HANDSHAKE_FAILED` | Confirm the ACP launch command; raise `handshake_timeout_s`; check the agent's auth. |
+| `ACP_PRE_PROMPT_TIMEOUT` | Raise `pre_prompt_timeout_s` / `default_pre_prompt_timeout_s`; check sandbox prep or a slow cold start. |
 | `ACP_REFUSED` / `ACP_EMPTY_ANSWER` | The agent answered nothing; check auth, or a local model's tool-calling support. |
 | `model_unavailable` (doctor) | The provider rejected the model id; on Bedrock/Vertex/Toolbox pin one via `[agents.claude_code.env]` — see [bedrock.md](bedrock.md). |
 | `ACP_TURN_TIMEOUT` | Raise `timeout_s` or `default_timeout_s`; use `mode="async"` for long tasks. |
+| Quiet sync / no MCP progress | Expected for `mode="sync"` through pre-prompt (`pre_prompt_timeout_s`) then the running prompt (`timeout_s`); do not invent a shorter cancel. Choose `mode="async"` before start for visibility and cancellation. |
 | `ACP_TURN_ERROR` | A transport/protocol error mid-turn; re-run, and check `doctor`. |
 | `WORKSPACE_NOT_TRUSTED` | Pass `trust_workspace=true` or add the path to `trusted_workspaces`. |
 | `UNKNOWN_TARGET` | Run `capabilities` to list registered agent ids; the id is case-sensitive. |

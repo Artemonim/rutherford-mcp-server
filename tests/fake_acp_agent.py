@@ -366,6 +366,10 @@ class FakeAgent:
     async def initialize(
         self, protocol_version: int, client_capabilities: Any = None, client_info: Any = None, **kwargs: Any
     ) -> InitializeResponse:
+        # Optional slow initialize for pre-prompt deadline tests (RUTHERFORD_FAKE_INIT_DELAY_S).
+        delay_raw = os.environ.get("RUTHERFORD_FAKE_INIT_DELAY_S")
+        if delay_raw:
+            await asyncio.sleep(float(delay_raw))
         # Advertise the loadSession capability so the resume (session/load) path is exercisable. A test that
         # needs an agent which CANNOT resume sets RUTHERFORD_FAKE_NO_LOADSESSION=1 (then a resume -> RESUME_FAILED).
         supports_load = os.environ.get("RUTHERFORD_FAKE_NO_LOADSESSION") != "1"

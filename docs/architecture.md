@@ -58,7 +58,7 @@ ACP runtime        src/rutherford/acp/
 domain + config    src/rutherford/domain/   models, enums, errors, error_codes
                    src/rutherford/config/   schema, loader, acp_json, panels, locations
                    src/rutherford/io/       serialize.py (TOON seam), ledger.py (F2 reader/writer), jsontext.py
-                   src/rutherford/runtime/  logging, recursion-depth / lineage env (depth.py)
+                   src/rutherford/runtime/  logging, ACP lifecycle stderr trace (acp_trace), recursion-depth / lineage env (depth.py)
 ```
 
 Dependencies point inward. The domain layer imports nothing from any other layer. The ACP runtime
@@ -116,16 +116,34 @@ delta and the agent remembers its own prior reasoning in-session.
 1. Resolves the launch argv for the platform (`launch.py` — see below) and spawns the agent as an ACP
    server with a clean stdio transport (the stdin read limit is raised from asyncio's 64 KiB default
    to 16 MiB so a large `session/update` does not drop the connection).
-2. Performs `initialize` and `new_session(cwd, mcp_servers=[])`, each bounded by the descriptor's
-   handshake timeout. ACP requires an absolute `cwd`, so it is resolved once here.
-3. A spawn failure raises `ACPHandshakeError(ACP_SPAWN_FAILED, ...)`; a handshake failure raises
+2. Performs `initialize` and `new_session(cwd, mcp_servers=[])` (or `session/load` on resume), each
+   bounded by the descriptor's handshake timeout, then model/effort selection when applicable. ACP
+   requires an absolute `cwd`, so it is resolved once here.
+3. When `pre_prompt_timeout_s` is set (call / per-agent / `default_pre_prompt_timeout_s`, default 90s),
+   steps 1–2 are wrapped in that overall deadline (`ACP_PRE_PROMPT_TIMEOUT` on expiry). It is separate
+   from post-acceptance `timeout_s`, ends before prompt acceptance, and does not consume semaphore
+   queue wait; per-stage `handshake_timeout_s` still applies inside the budget. Sandbox prep (when
+   applicable) shares the same pre-prompt budget upstream of `open`.
+4. A spawn failure raises `ACPHandshakeError(ACP_SPAWN_FAILED, ...)`; a handshake failure raises
    `ACPHandshakeError(ACP_HANDSHAKE_FAILED, ...)`. Both are pre-prompt, so re-execution-safe.
 
 `ACPSession.prompt(text, timeout_s)` runs one turn on the live session and reduces it to a normalized
-`DelegationResult`. It never raises for an operational failure — a timeout, refusal, empty answer, or
-transport error becomes a failed result carrying the ACP error code and a re-execution-safety
-classification. The result reduction reads everything from the turn's event journal (below), never
-from raw stdout.
+`DelegationResult`. The `timeout_s` here is only the running-prompt budget after acceptance. It never
+raises for an operational failure — a timeout, refusal, empty answer, or transport error becomes a
+failed result carrying the ACP error code and a re-execution-safety classification. The result
+reduction reads everything from the turn's event journal (below), never from raw stdout.
+
+**Operator stderr diagnostics (C3).** While a turn runs, Rutherford emits `acp_lifecycle` JSON lines on
+stderr (via `runtime/logging.log_event`, silenced by `log_format=off`) for queue / sandbox / spawn /
+handshake / prompt / finish / cancel stages, plus optional rate-limited prompt heartbeats
+(`acp_prompt_heartbeat_s`). These are process-operator diagnostics only: they never call
+`Context.report_progress`, never feed `ActivityCallback`, and never add MCP messages to a healthy sync
+result. The `acp_trace` boundary allowlists records before emit: top-level scalars
+(`stage` / `phase` / `status` / correlation / target / `pid` / `session_id`), nested
+`sandbox` (`active` / `kind`), `paths` (`cwd_leaf` / `sandbox_leaf`), `launch` (`command` basename),
+`timing` (elapsed / budget / wait / heartbeat seconds), and `error` (`code` /
+`reexecution_safety` / `stage` / budget / elapsed / `category`) — never prompt text, answers,
+partial output, environment, full paths, raw argv, or exception text (even if a caller passes them).
 
 `run_acp_turn(...)` is the one-shot wrapper (open, one turn, close) used by `delegate` and each
 `consensus` voice. `ACPSession.close()` tears the connection down and reaps the agent's orphaned
@@ -200,8 +218,10 @@ delegate_tool (tools/delegate.py)
 DelegationService.delegate (services/delegation.py)
   1. registry.has(cli)            -> UNKNOWN_TARGET if absent
   2. is_mutating(safety_mode)     -> trusted-workspace gate for write/yolo (WORKSPACE_NOT_TRUSTED)
-  3. resolve cwd, timeout, files; build PermissionPolicy
-  4. run_acp_turn(descriptor, prompt, policy, cwd, timeout, model)
+  3. resolve cwd, timeout_s, pre_prompt_timeout_s, files; build PermissionPolicy
+  4. sandbox prep (when applicable) + run_acp_turn(..., timeout_s, pre_prompt_timeout_s)
+     — pre-prompt budget covers sandbox / open through model/effort selection and ends before
+       prompt acceptance; timeout_s bounds only the running prompt; queue wait is outside both
         |
         v
 tool_success(result)  ->  encode(result)  ->  TOON text block returned to the MCP client
@@ -275,6 +295,7 @@ The ACP transport contributes a focused set of stable codes (all in `domain/erro
 | --- | --- | --- |
 | `ACP_SPAWN_FAILED` | the agent subprocess could not be launched | yes (pre-prompt) |
 | `ACP_HANDSHAKE_FAILED` | `initialize` / `new_session` failed | yes (pre-prompt) |
+| `ACP_PRE_PROMPT_TIMEOUT` | pre-prompt deadline expired before `session/prompt` (sandbox when applicable / spawn / initialize / session create/load / model/effort); no partial | yes (pre-prompt) |
 | `ACP_TURN_TIMEOUT` | the prompt turn exceeded its timeout; the session was cancelled | no |
 | `ACP_REFUSED` | the agent ended the turn by refusing | no |
 | `ACP_EMPTY_ANSWER` | the agent ended cleanly with no answer text | no |

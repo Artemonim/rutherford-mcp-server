@@ -13,6 +13,28 @@ All notable changes to this project are documented in this file. The format is b
   trusted-workspace gate without a per-call `trust_workspace=true`. Optional path argument;
   `trust --list` prints the global list. Creates the global `config.toml` when missing, preserves unrelated
   keys, refuses a malformed file. Console script alias `rutherford` added alongside `rutherford-mcp-server`.
+- **Hard pre-prompt deadline (`ACP_PRE_PROMPT_TIMEOUT`)** — configurable via `default_pre_prompt_timeout_s`
+  (default 90s), per-agent `pre_prompt_timeout_s`, env `RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S`, and
+  per-call `pre_prompt_timeout_s` on `delegate` / panel tools / `continue_job` / `review`. Bounds sandbox
+  prep, spawn, handshake, and model/effort selection before `session/prompt`; distinct from post-prompt
+  `timeout_s`. SAFE for fallback, unhealthy for cooldown, no partial answer. Semaphore queue wait does not
+  consume the budget. A sandbox open that misses the budget returns immediately (deferred cleanup of the
+  eventual tree; cancel uses the same pattern). When open succeeds but the pre-prompt budget is already
+  exhausted, cleanup is likewise deferred so a slow teardown cannot stretch the caller's hard deadline.
+- **ACP lifecycle stderr diagnostics (`acp_lifecycle`)** — structured JSON on stderr for queue / sandbox /
+  spawn / handshake / prompt / finish / cancel stages (delegate and direct `ACPSession` panel paths), with
+  correlation / target / timing / error metadata and safe path / launch leaves only. Rate-limited prompt
+  heartbeats via `acp_prompt_heartbeat_s` (default 30s; `0` disables; env `RUTHERFORD_ACP_PROMPT_HEARTBEAT_S`).
+  Silenced by `log_format=off`; never MCP progress / `ActivityCallback` / sync-result side effects.
+  The `acp_trace` boundary defensively allowlists primary and nested fields before emit. A sandbox prep
+  that exhausts the pre-prompt budget emits a single truthful `sandbox/exit status=failed` (never
+  ok-then-failed). Unexpected model/effort setup faults retain a safe `INTERNAL` / `setup_failed`
+  error payload on stderr without raw exception text.
+- **Docs: quiet synchronous delegation** — operator guidance that `mode="sync"` intentionally waits
+  silently through the pre-prompt startup budget then `timeout_s`; missing MCP progress is not a hang.
+  Choose `mode="async"` before starting when visibility/cancellation is needed; stderr structured logs
+  stay local operator observability. Reflected in troubleshooting, recipes, MCP client integration,
+  README jobs notes, and related security checklist / config log wording.
 
 ## [3.0.7] - 2026-07-13
 

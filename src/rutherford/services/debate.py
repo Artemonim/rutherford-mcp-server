@@ -55,6 +55,7 @@ from ..domain.models import (
     VoiceVerdict,
 )
 from ..io.ledger import RunLedger
+from ..runtime.acp_trace import acp_trace, bind_acp_trace
 from ..runtime.depth import ensure_within_aggregate_cap
 from .delegation import ActivityCallback, DelegationService, PanelLifecycle, emit_activity
 from .persistence import PanelVoice, write_panel_record
@@ -489,13 +490,40 @@ class DebateService:
                 # agent recalls the earlier argument; a seat that cannot reload fails open (RESUME_FAILED) and
                 # is recorded as a failed contribution, never silently dropped.
                 resume_session_id=_debate_resume_id(req, voice.index),
+                pre_prompt_timeout_s=self._config.resolve_pre_prompt_timeout_s(
+                    voice.target.cli, req.pre_prompt_timeout_s
+                ),
             )
-            try:
-                await session.open()
-            except ACPHandshakeError as exc:
-                open_errors[voice.index] = ErrorInfo(code=exc.code, message=exc.message)
-                return
-            sessions[voice.index] = session
+            with bind_acp_trace(
+                correlation_id=_seat_id(voice),
+                tool="debate",
+                cli=voice.target.cli,
+                model=voice.target.model,
+                depth=base_depth,
+                heartbeat_s=self._config.acp_prompt_heartbeat_s,
+            ):
+                open_started = time.monotonic()
+                try:
+                    await session.open()
+                except ACPHandshakeError as exc:
+                    error = ErrorInfo(
+                        code=exc.code,
+                        message=exc.message,
+                        details=exc.details,
+                        reexecution_safety=exc.safety,
+                    )
+                    open_errors[voice.index] = error
+                    self._delegation.record_error_health(voice.target.cli, error)
+                    failed = DelegationResult(
+                        ok=False,
+                        text="",
+                        target=voice.target,
+                        error=error,
+                        duration_s=round(time.monotonic() - open_started, 3),
+                    )
+                    session.trace_turn_finish(failed, open_started)
+                    return
+                sessions[voice.index] = session
 
         await asyncio.gather(*(_open(voice) for voice in voices))
 
@@ -526,21 +554,34 @@ class DebateService:
 
         async def _turn(voice: _Voice) -> DebateContribution:
             prompt = self._round_prompt(req, voice, history)
-            async with self._delegation.semaphore:
-                emit_activity(
-                    on_activity,
-                    ActivityEvent(
-                        kind=ActivityEventKind.VOICE_STARTED,
-                        correlation_id=_seat_id(voice),  # stable per-seat key across rounds
-                        cli=voice.target.cli,
-                        model=voice.target.model,
-                        role=req.role,
-                        depth=base_depth,
-                        status="started",
-                        message=f"{voice.label} (round {round_index}) started",
-                    ),
-                )
-                result = await sessions[voice.index].prompt(prompt, timeout_s=timeout_s)
+            with bind_acp_trace(
+                correlation_id=_seat_id(voice),
+                tool="debate",
+                cli=voice.target.cli,
+                model=voice.target.model,
+                depth=base_depth,
+                heartbeat_s=self._config.acp_prompt_heartbeat_s,
+            ):
+                queue_started = time.monotonic()
+                acp_trace("queue", "enter")
+                async with self._delegation.semaphore:
+                    wait_s = round(time.monotonic() - queue_started, 3)
+                    acp_trace("queue", "exit", status="ok", timing={"wait_s": wait_s})
+                    emit_activity(
+                        on_activity,
+                        ActivityEvent(
+                            kind=ActivityEventKind.VOICE_STARTED,
+                            correlation_id=_seat_id(voice),  # stable per-seat key across rounds
+                            cli=voice.target.cli,
+                            model=voice.target.model,
+                            role=req.role,
+                            depth=base_depth,
+                            status="started",
+                            message=f"{voice.label} (round {round_index}) started",
+                        ),
+                    )
+                    result = await sessions[voice.index].prompt(prompt, timeout_s=timeout_s)
+            self._delegation.record_health(voice.target.cli, result)
             contribution = _to_contribution(voice, round_index, result)
             emit_activity(
                 on_activity,
@@ -780,15 +821,25 @@ class DebateService:
             "the strongest case on each side, and end with your best overall answer."
         )
         descriptor = self._descriptors.get(judge.cli)
-        result = await run_acp_turn(
-            descriptor,
-            prompt,
-            policy=PermissionPolicy(SafetyMode.READ_ONLY),
-            cwd=cwd,
-            timeout_s=timeout_s,
+        with bind_acp_trace(
+            correlation_id="synthesize:0",
+            tool="debate",
+            cli=judge.cli,
             model=judge.model,
-            base_depth=base_depth + 1,
-        )
+            depth=base_depth + 1,
+            heartbeat_s=self._config.acp_prompt_heartbeat_s,
+        ):
+            result = await run_acp_turn(
+                descriptor,
+                prompt,
+                policy=PermissionPolicy(SafetyMode.READ_ONLY),
+                cwd=cwd,
+                timeout_s=timeout_s,
+                model=judge.model,
+                base_depth=base_depth + 1,
+                pre_prompt_timeout_s=self._config.resolve_pre_prompt_timeout_s(judge.cli, req.pre_prompt_timeout_s),
+            )
+        self._delegation.record_health(judge.cli, result)
         if not result.ok or not result.text.strip():
             return None, None, False
         return result.text, judge.display_label, self_authored

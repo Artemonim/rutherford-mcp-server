@@ -52,6 +52,10 @@ class AgentConfig(BaseModel):
     #: Per-agent run timeout in seconds. Overrides the global ``default_timeout_s`` for this agent when a
     #: call names no ``timeout_s``; ``None`` falls back to the global default.
     timeout_s: float | None = Field(default=None, gt=0)
+    #: Per-agent pre-prompt deadline in seconds (sandbox + spawn + handshake + model/effort selection).
+    #: Overrides the global ``default_pre_prompt_timeout_s`` when a call names no ``pre_prompt_timeout_s``;
+    #: ``None`` falls back to the global default. Distinct from ``timeout_s`` (a running prompt only).
+    pre_prompt_timeout_s: float | None = Field(default=None, gt=0)
     #: Extra arguments appended to the launch argv (after ``command``). Lets a built-in agent gain a flag
     #: without restating its whole command.
     extra_args: list[str] = Field(default_factory=list)
@@ -110,6 +114,11 @@ class RutherfordConfig(BaseModel):
     default_safety_mode: SafetyMode = SafetyMode.READ_ONLY
     #: Default per-run timeout in seconds.
     default_timeout_s: float = Field(default=300.0, gt=0)
+    #: Default pre-prompt deadline in seconds: sandbox prep, ACP spawn, initialize, session create/load, and
+    #: model/effort selection must finish before ``session/prompt`` is accepted. Distinct from
+    #: ``default_timeout_s`` (which governs only a running prompt). Semaphore queue wait does not consume this
+    #: budget.
+    default_pre_prompt_timeout_s: float = Field(default=90.0, gt=0)
     #: Default reasoning-effort tier when a call names none (F8a, 2-L); ``None`` = let the CLI decide.
     default_effort: Effort | None = None
     #: Default wall-clock time budget (seconds) for a panel / job when a call names none (F8a, 2-A').
@@ -225,6 +234,10 @@ class RutherfordConfig(BaseModel):
     #: Structured-log format: ``json`` (one JSON object per line, to stderr) or ``off`` to silence it.
     #: stdout is the MCP channel and is never written to.
     log_format: Literal["json", "off"] = "json"
+    #: Seconds between ACP prompt heartbeats on stderr while Rutherford awaits a prompt outcome
+    #: (``acp_lifecycle`` / ``phase=heartbeat``). ``0`` disables heartbeats; stage enter/exit still log
+    #: when ``log_format`` is ``json``. Does not push MCP progress and does not claim model liveness.
+    acp_prompt_heartbeat_s: float = Field(default=30.0, ge=0)
 
     @model_validator(mode="after")
     def _default_concurrency_to_targets(self) -> RutherfordConfig:
@@ -271,6 +284,20 @@ class RutherfordConfig(BaseModel):
         """Return the configured per-agent timeout (seconds) for ``agent_id``, if any."""
         entry = self.agents.get(agent_id)
         return entry.timeout_s if entry is not None else None
+
+    def pre_prompt_timeout_for(self, agent_id: str) -> float | None:
+        """Return the configured per-agent pre-prompt deadline (seconds) for ``agent_id``, if any."""
+        entry = self.agents.get(agent_id)
+        return entry.pre_prompt_timeout_s if entry is not None else None
+
+    def resolve_pre_prompt_timeout_s(self, agent_id: str, override: float | None = None) -> float:
+        """Resolve the pre-prompt deadline: per-call override, else per-agent, else the global default."""
+        if override is not None:
+            return override
+        per_agent = self.pre_prompt_timeout_for(agent_id)
+        if per_agent is not None:
+            return per_agent
+        return self.default_pre_prompt_timeout_s
 
     def effort_for(self, agent_id: str) -> Effort | None:
         """Resolve the default reasoning-effort tier for ``agent_id`` (F8a): per-agent, else global.

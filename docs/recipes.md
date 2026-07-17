@@ -122,9 +122,17 @@ requests according to the mode. See the [safety model](../README.md#safety-modes
 > Start a big refactor on OpenCode in the background — "convert the data layer to the repository pattern"
 > in `C:\work\myrepo` — and just give me the job id.
 
-`delegate` / `consensus` / `debate` in `mode="async"` returns a `{job_id, status, tool}` envelope
-immediately. The work runs as an in-memory task; its eventual result envelope is byte-for-byte the same
-as the sync path's.
+Choose the mode **before** you start:
+
+- `mode="sync"` (default) blocks the MCP request until the final result. A quiet wait is intentional:
+  first through the pre-prompt budget for startup, then — only after prompt acceptance — through
+  `timeout_s` for the running turn. Missing incremental MCP updates are not a hang. See
+  [troubleshooting.md](troubleshooting.md#sync-call-looks-hung-no-mcp-progress-for-a-long-time).
+- `mode="async"` when you need non-blocking visibility or cancellation. The call returns a
+  `{job_id, status, tool}` envelope immediately. The work runs as an in-memory task; its eventual
+  result envelope is byte-for-byte the same as the sync path's.
+
+Manage an async job with:
 
 - `list_jobs` — every retained job, newest first.
 - `activity` — only the jobs in flight right now, each with a live elapsed time, longest-running first.
@@ -135,7 +143,8 @@ as the sync path's.
 > List my Rutherford jobs. Is that refactor done? If it is, show me the result.
 
 Jobs are in-memory and clear on restart, and a finished one is evicted after `job_ttl_s` — collect the
-result before then.
+result before then. Structured stderr logs (`log_level` / `log_format`) help a local operator watch
+lifecycle events; they do not push MCP progress to the sync caller.
 
 ## Get a fresh, unbiased take on your own work
 
