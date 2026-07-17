@@ -124,7 +124,8 @@ Project docs are root `*.md` and `docs/`. When you add a file under `docs/` or a
 - `src/rutherford/services/` — orchestration: delegation, consensus, debate, jobs, roles.
 - `src/rutherford/tools/` — thin MCP tool wrappers (validate → service → envelope).
 - `src/rutherford/domain/` — models, enums, errors, error codes.
-- `src/rutherford/config/` — config loading / agent overrides.
+- `src/rutherford/config/` — config loading / agent overrides / global trust allowlist CLI helpers.
+
 - `src/rutherford/io/` — serialization (TOON) and I/O seams.
 - `src/rutherford/runtime/` — process/runtime helpers.
 - `src/rutherford/roles/` — built-in role personas (`.md` package data).
