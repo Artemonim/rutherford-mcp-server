@@ -49,6 +49,19 @@ def test_load_project_override(tmp_path: Path) -> None:
     assert config.pre_prompt_timeout_for("missing") is None
 
 
+def test_resolve_pre_prompt_timeout_cursor_priority(tmp_path: Path) -> None:
+    """Per-agent cursor pre_prompt_timeout_s wins over the global 90s default; call override wins over both."""
+    (tmp_path / "rutherford.toml").write_text(
+        "[agents.cursor]\npre_prompt_timeout_s = 300.0\n",
+        encoding="utf-8",
+    )
+    config = load_config(env=_iso_env(tmp_path), cwd=tmp_path)
+    assert config.default_pre_prompt_timeout_s == 90.0
+    assert config.resolve_pre_prompt_timeout_s("cursor") == 300.0
+    assert config.resolve_pre_prompt_timeout_s("goose") == 90.0
+    assert config.resolve_pre_prompt_timeout_s("cursor", override=180.0) == 180.0
+
+
 @pytest.mark.parametrize("name", ["rutherford.toml", ".rutherford.toml", ".rutherford/config.toml"])
 def test_has_project_config_honors_every_name(name: str, tmp_path: Path) -> None:
     assert has_project_config(tmp_path) is False  # nothing yet

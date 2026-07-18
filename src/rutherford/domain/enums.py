@@ -233,3 +233,40 @@ class ActivityEventKind(StrEnum):
     CUT = "cut"
     #: The whole run was cancelled by the caller (best-effort, on the outer cancel path).
     JOB_CANCELLED = "job_cancelled"
+
+
+class ModelRoutingChannel(StrEnum):
+    """How Rutherford passed an effective model to an agent for a turn (diagnostic provenance).
+
+    Orthogonal to :attr:`~rutherford.domain.models.Provenance.confirmed`: a launch-argv or env channel
+    can carry a real runtime model while remaining unconfirmed over ACP. Cursor's success state is
+    ``launch_argv`` with intent-only confirmation -- that is correct, not an error.
+    """
+
+    #: No Rutherford model selection; the agent runs on its own default.
+    AGENT_DEFAULT = "agent_default"
+    #: Model passed on process argv (e.g. Cursor ``--model`` via :attr:`AgentDescriptor.model_launch_flag`).
+    LAUNCH_ARGV = "launch_argv"
+    #: Model applied out-of-band via process environment (e.g. Bedrock ``ANTHROPIC_MODEL``).
+    ENVIRONMENT = "environment"
+    #: Model selected via ACP ``session/set_config_option`` on a model config option.
+    CONFIG_OPTION = "config_option"
+    #: Model selected via ACP ``session/set_model`` (legacy ``SessionModelState`` channel).
+    SESSION_SET_MODEL = "session_set_model"
+
+
+class ModelConfirmation(StrEnum):
+    """How strongly provenance attests that the effective model was the one that ran.
+
+    Maps onto :attr:`~rutherford.domain.models.Provenance.confirmed`: ``channel_confirmed`` and
+    ``runtime_observed`` imply ``confirmed=True``; ``none`` and ``intent_only`` imply ``confirmed=False``.
+    """
+
+    #: No model intent recorded (agent-default path with no explicit / default model).
+    NONE = "none"
+    #: Rutherford passed a model (launch argv / env / descriptor default) but ACP did not attest runtime.
+    INTENT_ONLY = "intent_only"
+    #: An in-session ACP channel verified the selection (config ``current_value`` or successful set_model).
+    CHANNEL_CONFIRMED = "channel_confirmed"
+    #: Runtime observation attested the model (tests / manual diagnostics only; not production ACP).
+    RUNTIME_OBSERVED = "runtime_observed"

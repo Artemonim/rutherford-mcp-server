@@ -13,7 +13,7 @@ from rutherford.acp.journal import EventJournal, JournalEvent
 from rutherford.acp.permission import PermissionPolicy
 from rutherford.acp.session import ACPHandshakeError, ACPSession, _post_prompt_safety, run_acp_turn
 from rutherford.config.schema import RutherfordConfig
-from rutherford.domain.enums import ReexecutionSafety, SafetyMode
+from rutherford.domain.enums import ModelConfirmation, ModelRoutingChannel, ReexecutionSafety, SafetyMode
 from rutherford.domain.error_codes import ErrorCode
 from rutherford.domain.models import DelegationRequest, DelegationResult, Target
 from rutherford.services.delegation import DelegationService
@@ -182,6 +182,9 @@ async def test_run_turn_records_requested_and_selected_model(monkeypatch: pytest
     assert result.provenance is not None
     assert result.provenance.model == "fake-model"
     assert result.provenance.confirmed is True
+    # * ACP 0.11+: RUTHERFORD_FAKE_MODELS is promoted onto the config-option channel (no SessionModelState).
+    assert result.provenance.routing_channel is ModelRoutingChannel.CONFIG_OPTION
+    assert result.provenance.model_confirmation is ModelConfirmation.CHANNEL_CONFIRMED
 
 
 async def test_run_turn_without_model_keeps_default_path() -> None:
@@ -246,6 +249,8 @@ async def test_select_model_via_config_option_channel(monkeypatch: pytest.Monkey
     assert "model=sonnet" in result.text
     assert result.selected_model == "sonnet"
     assert result.provenance is not None and result.provenance.confirmed is True
+    assert result.provenance.routing_channel is ModelRoutingChannel.CONFIG_OPTION
+    assert result.provenance.model_confirmation is ModelConfirmation.CHANNEL_CONFIRMED
 
 
 async def test_unadvertised_model_is_model_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,6 +322,9 @@ async def test_set_model_only_channel_confirms(monkeypatch: pytest.MonkeyPatch) 
     assert result.ok is True
     assert result.selected_model == "gpt-5.2"
     assert result.provenance is not None and result.provenance.confirmed is True
+    # * ACP 0.11+: FAKE_MODELS lands on config_option (legacy set_model channel is gone); still channel_confirmed.
+    assert result.provenance.routing_channel is ModelRoutingChannel.CONFIG_OPTION
+    assert result.provenance.model_confirmation is ModelConfirmation.CHANNEL_CONFIRMED
 
 
 async def test_legacy_set_model_unavailable_when_sdk_lacks_method(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,6 +357,41 @@ async def test_legacy_set_model_unavailable_when_sdk_lacks_method(monkeypatch: p
     assert "set_session_model" in (result.error.message or "")
     assert result.selected_model is None
     assert result.requested_model == "gpt-5.2"
+
+
+async def test_set_model_channel_records_session_set_model_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    # * Force the set_model-only branch (legacy session.models, no config option) and stub set_session_model so
+    # ACP 0.11 still exercises SESSION_SET_MODEL + channel_confirmed provenance.
+    from types import SimpleNamespace
+
+    from acp.client.connection import ClientSideConnection
+
+    set_calls: list[str] = []
+
+    async def _fake_set_model(self: object, *, model_id: str, session_id: str) -> None:
+        set_calls.append(model_id)
+
+    monkeypatch.setattr(ClientSideConnection, "set_session_model", _fake_set_model, raising=False)
+    legacy_models = SimpleNamespace(
+        available_models=[SimpleNamespace(model_id="gpt-5.2"), SimpleNamespace(model_id="gpt-4")]
+    )
+    legacy_only = SimpleNamespace(session_id="legacy-ok-1", config_options=None, models=legacy_models)
+
+    async def _fake_new(self: ACPSession, conn: object) -> object:
+        self._session_id = "legacy-ok-1"
+        return legacy_only
+
+    monkeypatch.setattr(ACPSession, "_new_session", _fake_new)
+    result = await run_acp_turn(
+        FAKE, "what is 17 + 25?", policy=_READ_ONLY, cwd=str(REPO_ROOT), timeout_s=60.0, model="gpt-5.2"
+    )
+    assert result.ok is True
+    assert set_calls == ["gpt-5.2"]
+    assert result.selected_model == "gpt-5.2"
+    assert result.provenance is not None
+    assert result.provenance.confirmed is True
+    assert result.provenance.routing_channel is ModelRoutingChannel.SESSION_SET_MODEL
+    assert result.provenance.model_confirmation is ModelConfirmation.CHANNEL_CONFIRMED
 
 
 # --- ACP 0.11 config-only responses (no session.models attribute) -------------
@@ -437,6 +480,8 @@ async def test_launch_validate_passes_config_only_advertisement(monkeypatch: pyt
     assert result.target.model == "sonnet"
     assert result.selected_model is None
     assert result.provenance is not None and result.provenance.confirmed is False
+    assert result.provenance.routing_channel is ModelRoutingChannel.LAUNCH_ARGV
+    assert result.provenance.model_confirmation is ModelConfirmation.INTENT_ONLY
 
 
 async def test_launch_unadvertised_model_config_only_proceeds_via_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -521,6 +566,8 @@ async def test_launch_model_skips_in_session_rpc_and_stays_unconfirmed(monkeypat
     assert result.provenance is not None
     assert result.provenance.model == "sonnet"  # effective model that ran (for F3 lineage); not in-session confirmed
     assert result.provenance.confirmed is False
+    assert result.provenance.routing_channel is ModelRoutingChannel.LAUNCH_ARGV
+    assert result.provenance.model_confirmation is ModelConfirmation.INTENT_ONLY
 
 
 def test_split_csv_respecting_brackets() -> None:
@@ -541,7 +588,7 @@ def test_split_csv_respecting_brackets() -> None:
 
 
 def test_cursor_runtime_family_prefix_matching() -> None:
-    from tests.integration.test_cursor_model_routing import _runtime_matches_family
+    from tests.acp.cursor_runtime import _runtime_matches_family
 
     assert _runtime_matches_family(["cursor-grok-4.5-high-fast"], "grok")
     assert _runtime_matches_family(["grok-4.5-high"], "grok")
@@ -575,6 +622,8 @@ async def test_launch_model_accepts_boolean_fast_variant(monkeypatch: pytest.Mon
     assert result.target.model == requested
     assert result.selected_model is None
     assert result.provenance is not None and result.provenance.confirmed is False
+    assert result.provenance.routing_channel is ModelRoutingChannel.LAUNCH_ARGV
+    assert result.provenance.model_confirmation is ModelConfirmation.INTENT_ONLY
 
 
 async def test_launch_model_accepts_grok_fast_variant_same_effort(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,6 +687,8 @@ async def test_launch_model_unadvertised_proceeds_unconfirmed(monkeypatch: pytes
     assert result.requested_model == "claude-opus-4-8"
     assert result.provenance is not None and result.provenance.model == "claude-opus-4-8"  # effective, unconfirmed
     assert result.provenance.confirmed is False
+    assert result.provenance.routing_channel is ModelRoutingChannel.LAUNCH_ARGV
+    assert result.provenance.model_confirmation is ModelConfirmation.INTENT_ONLY
     assert result.argv is not None and result.argv[-2:] == ["--model", "claude-opus-4-8"]
 
 
@@ -650,6 +701,8 @@ async def test_launch_model_default_path_without_model() -> None:
     assert "launch_model=(unset)" in result.text
     assert result.selected_model is None
     assert result.provenance is not None and result.provenance.confirmed is False
+    assert result.provenance.routing_channel is ModelRoutingChannel.AGENT_DEFAULT
+    assert result.provenance.model_confirmation is ModelConfirmation.NONE
 
 
 def test_model_config_option_matches_by_category_and_keeps_only_string_values() -> None:

@@ -215,6 +215,10 @@ provider = "openai"
 base    = "goose"
 backend = "ollama"
 model   = "qwen3:8b"
+
+# Cursor sandbox prep often needs >90s; leave default_pre_prompt_timeout_s at 90.
+# [agents.cursor]
+# pre_prompt_timeout_s = 300
 ```
 
 ---

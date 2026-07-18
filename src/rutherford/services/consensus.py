@@ -35,6 +35,7 @@ from ..domain.enums import (
     EFFORT_ORDER,
     ActivityEventKind,
     Effort,
+    ModelConfirmation,
     ReexecutionSafety,
     SafetyMode,
     Stance,
@@ -712,6 +713,8 @@ class ConsensusService:
             # provenance.model is the EFFECTIVE model the turn ran under (target.model), so F3 diversity /
             # correlation-discount keep their lineage key; `confirmed` alone attests an in-session selection.
             effective = session.target.model if session is not None else target.model
+            routing = session.routing_channel if session is not None else None
+            confirmation = session.model_confirmation if session is not None else ModelConfirmation.NONE
             return DelegationResult(
                 target=session.target if session is not None else Target(cli=target.cli, model=target.model),
                 ok=True,
@@ -728,6 +731,8 @@ class ConsensusService:
                     provider=self._descriptors.get(target.cli).provider if self._descriptors.has(target.cli) else None,
                     model=effective,
                     confirmed=confirmed,
+                    routing_channel=routing,
+                    model_confirmation=confirmation,
                 ),
             )
         return DelegationResult(

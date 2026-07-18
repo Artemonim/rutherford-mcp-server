@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Provenance routing diagnostics** — additive `provenance.routing_channel` (`launch_argv`,
+  `config_option`, `session_set_model`, `environment`, `agent_default`) and
+  `provenance.model_confirmation` (`none`, `intent_only`, `channel_confirmed`, `runtime_observed`).
+  Cursor launch `--model` correctly reports `launch_argv` + `intent_only` with `confirmed: false`
+  (ACP does not attest runtime for argv routing). Existing `confirmed` semantics are unchanged.
+- **Opt-in Cursor live regressions** — `tests/integration/test_cursor_model_routing.py` (launch-argv
+  family checks, dual independent sessions, unknown model) and
+  `tests/integration/test_cursor_session_load.py` (`session/load` resume + known never-prompted load
+  limitation). Marked `integration`; skipped without `cursor-agent`.
 - **`rutherford trust` / `rutherford untrust` CLI** — from a repo root, register (or remove) the current
   directory in the platform global `trusted_workspaces` allowlist so `write` / `yolo` delegations pass the
   trusted-workspace gate without a per-call `trust_workspace=true`. Optional path argument;
@@ -35,6 +44,15 @@ All notable changes to this project are documented in this file. The format is b
   Choose `mode="async"` before starting when visibility/cancellation is needed; stderr structured logs
   stay local operator observability. Reflected in troubleshooting, recipes, MCP client integration,
   README jobs notes, and related security checklist / config log wording.
+
+### Changed
+
+- **Clarified and regression-tested Cursor launch-argv model routing** — troubleshooting documents that
+  `confirmed: false` (and `routing_channel=launch_argv` / `model_confirmation=intent_only`) is the
+  correct Cursor success state, not a signal to call `session/set_model`. Opt-in integration modules
+  lock family routing and `session/load` resume behaviour. Launch-argv routing itself already worked;
+  this does not claim a routing fix. Cursor `pre_prompt_timeout_s = 300` recipe remains the sandbox
+  budget guidance (global default stays 90s).
 
 ## [3.0.7] - 2026-07-13
 

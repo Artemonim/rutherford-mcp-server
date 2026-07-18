@@ -112,6 +112,9 @@ async def test_generated_toml_parses_and_validates_against_config(tmp_path, monk
         data = decode(await setup_tool(_app(), scope="project", trust_workspace=trust))
         parsed = tomllib.loads(data["content"])
         RutherfordConfig.model_validate(parsed)  # raises on an unknown or invalid key
+        # * Commented Cursor pre-prompt example stays in the scaffold (not active TOML).
+        assert "[agents.cursor]" in data["content"]
+        assert "pre_prompt_timeout_s = 300" in data["content"]
 
 
 async def test_bedrock_env_scaffolds_a_commented_claude_env_block(tmp_path, monkeypatch) -> None:

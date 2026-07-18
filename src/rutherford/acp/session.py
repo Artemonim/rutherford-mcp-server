@@ -40,7 +40,7 @@ from acp.schema import (
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 
-from ..domain.enums import Effort, ReexecutionSafety
+from ..domain.enums import Effort, ModelConfirmation, ModelRoutingChannel, ReexecutionSafety
 from ..domain.error_codes import ErrorCode
 from ..domain.models import Cost, DelegationResult, ErrorInfo, Provenance, Target
 from ..runtime.acp_trace import PromptHeartbeat, acp_trace, launch_command_basename, path_leaf
@@ -210,6 +210,10 @@ class ACPSession:
         self._selected_model: str | None = None
         #: Whether :meth:`_select_model` confirmed the effective model over an in-session ACP channel.
         self._model_confirmed = False
+        #: Which channel carried the effective model (diagnostic; maps with :attr:`_model_confirmation`).
+        self._routing_channel: ModelRoutingChannel | None = ModelRoutingChannel.AGENT_DEFAULT
+        #: Attestation strength for the routing channel (drives :attr:`_model_confirmed` when set via helper).
+        self._model_confirmation: ModelConfirmation = ModelConfirmation.NONE
         # F2 replay-completeness: the LOGICAL launch argv (the agent's ACP-server command plus any
         # effort-override extra args and, when :attr:`AgentDescriptor.model_launch_flag` is set, the
         # flag+effective-model pair). Pinned here so a persisted run records what it was issued with. Kept
@@ -294,6 +298,28 @@ class ACPSession:
         Launch-flag intent alone is never confirmation -- ACP does not attest runtime inference.
         """
         return self._model_confirmed
+
+    @property
+    def routing_channel(self) -> ModelRoutingChannel | None:
+        """Which channel carried the effective model for this session (diagnostic provenance)."""
+        return self._routing_channel
+
+    @property
+    def model_confirmation(self) -> ModelConfirmation:
+        """Attestation strength for :attr:`routing_channel` (maps onto :attr:`model_confirmed`)."""
+        return self._model_confirmation
+
+    def _set_model_routing(self, channel: ModelRoutingChannel, confirmation: ModelConfirmation) -> None:
+        """Record routing diagnostics and keep :attr:`_model_confirmed` consistent with confirmation.
+
+        ``channel_confirmed`` / ``runtime_observed`` set confirmed True; ``none`` / ``intent_only`` keep it False.
+        """
+        self._routing_channel = channel
+        self._model_confirmation = confirmation
+        self._model_confirmed = confirmation in (
+            ModelConfirmation.CHANNEL_CONFIRMED,
+            ModelConfirmation.RUNTIME_OBSERVED,
+        )
 
     @property
     def launch_argv(self) -> list[str]:
@@ -718,9 +744,12 @@ class ACPSession:
         """
         model = self._target.model
         if not model or self._session_id is None:
+            # * Agent-default path: no Rutherford model intent; routing stays agent_default / none.
             return
         if self._model_via_launch:
             await self._validate_launch_model(session, model)
+            # * Launch argv is intent only -- ACP does not attest Cursor inference; confirmed stays False.
+            self._set_model_routing(ModelRoutingChannel.LAUNCH_ARGV, ModelConfirmation.INTENT_ONLY)
             return
         found = _model_config_option(self._config_options)
         in_config = found is not None and model in found[2]
@@ -742,6 +771,8 @@ class ACPSession:
                     "not advertised by session.models or a model config option",
                     ReexecutionSafety.SAFE,
                 )
+            # * Out-of-band / env-injected descriptor default: intent only, never ACP-confirmed.
+            self._set_model_routing(ModelRoutingChannel.ENVIRONMENT, ModelConfirmation.INTENT_ONLY)
             return
         # * Prefer the verifiable config-option channel whenever it advertises the target.
         if in_config:
@@ -749,7 +780,7 @@ class ACPSession:
             config_id, current, _values = found
             if current == model:
                 self._selected_model = model
-                self._model_confirmed = True
+                self._set_model_routing(ModelRoutingChannel.CONFIG_OPTION, ModelConfirmation.CHANNEL_CONFIRMED)
                 return
             try:
                 response = await asyncio.wait_for(
@@ -775,7 +806,7 @@ class ACPSession:
                     ReexecutionSafety.SAFE,
                 )
             self._selected_model = model
-            self._model_confirmed = True
+            self._set_model_routing(ModelRoutingChannel.CONFIG_OPTION, ModelConfirmation.CHANNEL_CONFIRMED)
             return
         # set_model-only: legacy SessionModelState advertises the id. ACP SDK 0.11+ drops set_session_model --
         # call only when the connection still exposes it; otherwise a structured MODEL_UNAVAILABLE (not AttributeError).
@@ -800,7 +831,7 @@ class ACPSession:
                 ReexecutionSafety.SAFE,
             ) from exc
         self._selected_model = model
-        self._model_confirmed = True
+        self._set_model_routing(ModelRoutingChannel.SESSION_SET_MODEL, ModelConfirmation.CHANNEL_CONFIRMED)
 
     async def _validate_launch_model(self, session: NewSessionResponse | LoadSessionResponse, model: str) -> None:
         """Soft advertisement check for a launch-flag model: never fatal, never claims confirmation.
@@ -930,6 +961,8 @@ class ACPSession:
                 self._session_id,
                 start,
                 model_confirmed=self._model_confirmed,
+                routing_channel=self._routing_channel,
+                model_confirmation=self._model_confirmation,
             )
             stamped = self._stamp(result)
             self._trace_finish(stamped, start, timeout_s=timeout_s)
@@ -1197,6 +1230,8 @@ def _reduce(
     start: float,
     *,
     model_confirmed: bool,
+    routing_channel: ModelRoutingChannel | None = None,
+    model_confirmation: ModelConfirmation = ModelConfirmation.NONE,
 ) -> DelegationResult:
     """Project the finished turn's journal + stop reason into a normalized result."""
     text = journal.message_text().strip()
@@ -1225,6 +1260,7 @@ def _reduce(
     # the correlation discount key on. ``confirmed`` alone attests whether an in-session ACP selection was
     # verified; the model id is never nulled when unconfirmed, or a launch-argv / env-injected model (which
     # still ran) would lose its lineage and two same-model voices would dodge the correlation discount.
+    # routing_channel / model_confirmation are additive diagnostics (Cursor launch_argv + intent_only is correct).
     return DelegationResult(
         target=target,
         ok=True,
@@ -1232,7 +1268,13 @@ def _reduce(
         cost=cost,
         session_id=session_id,
         duration_s=round(time.monotonic() - start, 3),
-        provenance=Provenance(provider=descriptor.provider, model=target.model, confirmed=model_confirmed),
+        provenance=Provenance(
+            provider=descriptor.provider,
+            model=target.model,
+            confirmed=model_confirmed,
+            routing_channel=routing_channel,
+            model_confirmation=model_confirmation,
+        ),
         safety_mode=policy.mode,
     )
 

@@ -21,6 +21,8 @@ from .enums import (
     DelegationMode,
     Effort,
     JobStatus,
+    ModelConfirmation,
+    ModelRoutingChannel,
     OutputMode,
     ReexecutionSafety,
     Runtime,
@@ -134,7 +136,13 @@ class Provenance(BaseModel):
       (config-option ``current_value`` match after ``set_config_option``, or a successful
       ``session/set_model`` response on a set_model-only agent). ``False`` when provider/model were
       inferred, when selection used a launch flag only, or when no model was selected. An ACP config
-      echo or argv intent alone is never attestation of actual inference.
+      echo or argv intent alone is never attestation of actual inference. Kept for wire compatibility;
+      :attr:`model_confirmation` carries the finer diagnostic (``channel_confirmed`` /
+      ``runtime_observed`` map to ``True``; ``none`` / ``intent_only`` map to ``False``).
+    * ``routing_channel`` -- which transport carried the effective model (launch argv, env, config
+      option, set_model, or agent default). ``None`` until known; omitted under ``exclude_none``.
+    * ``model_confirmation`` -- attestation strength for that channel. Cursor's correct success state
+      is ``launch_argv`` + ``intent_only`` with ``confirmed=False`` -- not an error.
     """
 
     provider: str | None = None
@@ -142,6 +150,8 @@ class Provenance(BaseModel):
     model: str | None = None
     cli_version: str | None = None
     confirmed: bool = False
+    routing_channel: ModelRoutingChannel | None = None
+    model_confirmation: ModelConfirmation = ModelConfirmation.NONE
 
 
 class DiversityReport(BaseModel):

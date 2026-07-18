@@ -108,6 +108,11 @@ tools over ACP, or waiting on its own model provider. Rutherford does not scrape
 "still alive" signal, and the MCP client UI is not required to show host-specific UI/IDE activity for a
 headless ACP child — none of that is a protocol guarantee.
 
+Raising `timeout_s` (for example `timeout_s=1200`) does **not** extend sandbox or other pre-prompt
+stages. Those stay under `pre_prompt_timeout_s` / `default_pre_prompt_timeout_s`. For an
+`ACP_PRE_PROMPT_TIMEOUT` with `stage` `sandbox` (common on Cursor), set
+`[agents.cursor] pre_prompt_timeout_s = 300` or pass per-call `pre_prompt_timeout_s`.
+
 **What to do**
 
 - During startup, leave a sync call alone until the pre-prompt deadline expires. Only after the prompt
@@ -157,6 +162,8 @@ Semaphore queue wait does not consume this budget. Error `details` carry `stage`
 - Raise the per-call `pre_prompt_timeout_s`, or `[agents.<id>] pre_prompt_timeout_s` /
   `default_pre_prompt_timeout_s` in config.
 - Check whether sandbox prep (large non-git copy) or a slow cold agent start is the stage in `details`.
+- Cursor recipe: keep the global default at 90s and set `[agents.cursor] pre_prompt_timeout_s = 300`
+  (or pass per-call `pre_prompt_timeout_s=300`).
 
 ### `hermes` is slow or times out intermittently
 
@@ -216,6 +223,33 @@ a `role_dirs` entry pointing at the directory with the `.md` file.
 ```toml
 role_dirs = ["/home/user/.rutherford/roles"]
 ```
+
+### Cursor: `confirmed: false` with the correct model is normal
+
+For Cursor, the effective model rides the process launch argv (`cursor-agent acp --model <id>` via
+`AgentDescriptor.model_launch_flag`). ACP does **not** attest the runtime model after that launch, so a
+successful Cursor turn correctly reports:
+
+- `provenance.confirmed: false`
+- `provenance.routing_channel: launch_argv` (when present)
+- `provenance.model_confirmation: intent_only` (when present)
+
+`provenance.model` is still the effective model Rutherford intended for the turn (lineage /
+correlation). Do **not** “fix” this by calling `session/set_model` or `set_config_option` — those can
+echo `currentValue` without changing Cursor inference and may mutate a persistent global default.
+
+If the wrong *family* of model actually ran, that is a routing/entitlement issue; treat
+`confirmed: false` alone as expected for launch-argv agents, not as a failure signal. See also
+[ACP_PRE_PROMPT_TIMEOUT](#acp_pre_prompt_timeout--not-prompt-ready-in-time) for Cursor sandbox budgets
+(`pre_prompt_timeout_s = 300`).
+
+### Cursor: `session/load` without a prior prompt
+
+Cursor’s persisted ACP store under `~/.cursor/acp-sessions/<session_id>/` appears after the **first
+prompt** turn. `meta.json` alone is not enough for a successful `session/load`. Loading a
+never-prompted or unknown `session_id` typically yields Session not found / `RESUME_FAILED`. Resume
+after a completed prompt (same `session_id`) is the supported path — see
+[integration testing](integration-testing.md#cursor-opt-in-modules).
 
 ### `JOB_NOT_FOUND` — polling a job that no longer exists
 

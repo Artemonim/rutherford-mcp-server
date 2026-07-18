@@ -41,6 +41,24 @@ prompt. Across agents: a parallel `consensus` over two `goose` voices returns on
 a multi-round `debate` over persistent sessions returns the per-round transcript. The full ACP stack is
 exercised, not a mock.
 
+### Cursor opt-in modules
+
+Two Cursor-specific modules skip when `cursor-agent` is absent and stay deselected with `-m 'not
+integration'`:
+
+- `tests/integration/test_cursor_model_routing.py` — live launch `--model` family checks against
+  `~/.cursor/acp-sessions/<id>/store.db` (Grok / Composer bracket + bare ids, dual independent
+  sessions, unknown model must not succeed on a default).
+- `tests/integration/test_cursor_session_load.py` — resume after a prompt via `session/load`, plus the
+  known limitation that load without a prior prompt / unknown id fails (`RESUME_FAILED`).
+
+Point runs without the unit-suite coverage fail-under (plain `addopts` includes fail-under):
+
+```sh
+uv run pytest tests/integration/test_cursor_model_routing.py -m integration -s -q -o addopts=""
+uv run pytest tests/integration/test_cursor_session_load.py -m integration -s -q -o addopts=""
+```
+
 ## Preparing an agent
 
 Rutherford never logs in for you. Sign in to each agent with its own flow (or set its API key) once, so
