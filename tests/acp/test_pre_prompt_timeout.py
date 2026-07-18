@@ -23,6 +23,7 @@ from rutherford.domain.models import ConsensusRequest, ConsensusResult, DebateRe
 from rutherford.services.consensus import ConsensusService
 from rutherford.services.debate import DebateService
 from rutherford.services.delegation import DelegationService
+from tests.acp.post_open_budget import install_post_open_budget_exhaustion, lite_sandbox
 from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
 FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
@@ -456,9 +457,11 @@ async def test_sandbox_post_open_budget_exhausted_cleanup_is_hard_for_caller(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Open succeeds but budget is already gone: caller returns without awaiting a slow cleanup."""
+    # * Stub open (no git worktree) so a tight wait_for budget cannot race real sandbox I/O under xdist.
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git_repo(repo)
+    sandbox_root = tmp_path / "lite-sandbox"
+    sandbox_root.mkdir()
 
     budget_s = 1.0
     cleanup_block_s = 1.5
@@ -466,41 +469,22 @@ async def test_sandbox_post_open_budget_exhausted_cleanup_is_hard_for_caller(
         DescriptorRegistry([FAKE]),
         RutherfordConfig(trusted_workspaces=[str(repo)], default_pre_prompt_timeout_s=budget_s),
     )
-    real_open = service._sandbox.open
     cleaned: list[str] = []
     cleanup_done = asyncio.Event()
     real_monotonic = time.monotonic
-    past_open = {"flag": False}
-    anchor = real_monotonic()
-    real_wait_for = asyncio.wait_for
 
-    def tracking_open(cwd: str) -> object:
-        sandbox = real_open(cwd)
-        real_cleanup = sandbox.cleanup
+    def slow_cleanup() -> None:
+        time.sleep(cleanup_block_s)
+        cleaned.append(str(sandbox_root))
+        # * Mimic real cleanup removing the leaf so the caller assertion stays meaningful.
+        sandbox_root.rmdir()
+        cleanup_done.set()
 
-        def slow_cleanup() -> None:
-            time.sleep(cleanup_block_s)
-            cleaned.append(sandbox.root)
-            real_cleanup()
-            cleanup_done.set()
-
-        sandbox.cleanup = slow_cleanup  # type: ignore[method-assign]
-        return sandbox
-
-    def fake_monotonic() -> float:
-        # * Only after sandbox open resolves: report the whole budget already spent.
-        if past_open["flag"]:
-            return anchor + 10.0
-        return real_monotonic()
-
-    async def wait_for_then_exhaust(awaitable: object, *args: object, **kwargs: object) -> object:
-        result: object = await real_wait_for(awaitable, *args, **kwargs)  # type: ignore[arg-type]
-        past_open["flag"] = True
-        return result
+    def tracking_open(_cwd: str) -> object:
+        return lite_sandbox(root=str(sandbox_root), cleanup=slow_cleanup)
 
     monkeypatch.setattr(service._sandbox, "open", tracking_open)
-    monkeypatch.setattr(time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(asyncio, "wait_for", wait_for_then_exhaust)
+    install_post_open_budget_exhaustion(monkeypatch)
 
     started = real_monotonic()
     result = await service.delegate(

@@ -4,11 +4,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
-import subprocess
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -24,6 +21,7 @@ from rutherford.domain.models import DelegationRequest, Target
 from rutherford.runtime.acp_trace import bind_acp_trace
 from rutherford.runtime.logging import configure_logging
 from rutherford.services.delegation import DelegationService, emit_activity
+from tests.acp.post_open_budget import install_post_open_budget_exhaustion, lite_sandbox
 from tests.paths import FAKE_ACP_CMD, REPO_ROOT
 
 FAKE = AgentDescriptor("fake", "Fake", FAKE_ACP_CMD)
@@ -56,15 +54,6 @@ def _lifecycle_rows(stream: io.StringIO) -> list[dict[str, Any]]:
         if payload.get("event") == "acp_lifecycle":
             rows.append(payload)
     return rows
-
-
-def _git_repo(path: Path) -> None:
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True, capture_output=True)
-    (path / "README").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "seed"], cwd=path, check=True, capture_output=True)
 
 
 async def test_delegate_direct_lifecycle_order_on_stderr() -> None:
@@ -153,9 +142,9 @@ async def test_sandbox_budget_exhausted_emits_single_failed_exit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A successful open that leaves no remaining pre-prompt budget must not emit ok then failed."""
+    # * Stub open (no git worktree) so a tight wait_for budget cannot race real sandbox I/O under xdist.
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git_repo(repo)
 
     stream = io.StringIO()
     configure_logging("info", "json", stream=stream)
@@ -163,24 +152,12 @@ async def test_sandbox_budget_exhausted_emits_single_failed_exit(
         DescriptorRegistry([FAKE]),
         RutherfordConfig(trusted_workspaces=[str(repo)], acp_prompt_heartbeat_s=0.0),
     )
-    real_monotonic = time.monotonic
-    past_open = {"flag": False}
-    anchor = real_monotonic()
-    real_wait_for = asyncio.wait_for
 
-    def fake_monotonic() -> float:
-        # * Only after sandbox open resolves: report the whole budget already spent.
-        if past_open["flag"]:
-            return anchor + 10.0
-        return real_monotonic()
+    def tracking_open(_cwd: str) -> object:
+        return lite_sandbox(root=str(tmp_path / "lite-sandbox"))
 
-    async def wait_for_then_exhaust(awaitable: object, *args: object, **kwargs: object) -> object:
-        result: object = await real_wait_for(awaitable, *args, **kwargs)  # type: ignore[arg-type]
-        past_open["flag"] = True
-        return result
-
-    monkeypatch.setattr(time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(asyncio, "wait_for", wait_for_then_exhaust)
+    monkeypatch.setattr(service._sandbox, "open", tracking_open)
+    install_post_open_budget_exhaustion(monkeypatch)
 
     result = await service.delegate(
         DelegationRequest(
