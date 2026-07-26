@@ -188,12 +188,16 @@ trusted_workspaces = ["/home/user/projects/myapp", "C:\\Users\\user\\projects\\m
 From the repo root, the one-shot CLI registers cwd in the **global** allowlist:
 
 ```sh
-rutherford trust                 # or: python -m rutherford trust [/path]
+rutherford trust                 # or: rutherford-mcp-server trust / python -m rutherford trust [/path]
 rutherford untrust               # remove cwd (or a path) from the global allowlist
 rutherford trust --list
 ```
 
 Or set `RUTHERFORD_TRUSTED_WORKSPACES` (paths separated by `;` on Windows, `:` on POSIX).
+
+Rutherford reads config once at server start, so restart or reconnect the MCP server before retrying --
+or pass `trust_workspace=true` on the call, which takes effect immediately. This applies to the env var
+too: a running server will not pick up either without a restart.
 
 ### `UNKNOWN_TARGET` — agent id not recognized
 

@@ -156,10 +156,12 @@ To allow `write` / `yolo` delegations into the current repo without a per-call `
 register cwd in the global allowlist:
 
 ```sh
-rutherford trust                 # adds cwd to global trusted_workspaces
+rutherford trust                 # or: rutherford-mcp-server trust / python -m rutherford trust
 rutherford trust --list
 rutherford untrust               # removes cwd from the global allowlist
 ```
+
+Config is read once at server start, so restart or reconnect the server for a new entry to take effect.
 
 **4. Run `doctor` first.** Multi-agent auth and PATH is the most common thing that goes wrong, so
 confirm the crew actually drives before your first real task:

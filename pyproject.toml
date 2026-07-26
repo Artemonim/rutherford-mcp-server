@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rutherford-mcp-server"
-version = "3.0.7"
+version = "3.1.0"
 description = "An MCP server that orchestrates a crew of agentic coding agents over the Agent Client Protocol (ACP)."
 readme = "README.md"
 license = "MIT"
@@ -56,8 +56,10 @@ Issues = "https://github.com/chapmanjw/rutherford-mcp-server/issues"
 Changelog = "https://github.com/chapmanjw/rutherford-mcp-server/blob/main/CHANGELOG.md"
 
 [project.scripts]
+# * Canonical console script (matches upstream). Prefer this when rutherford-cli is also on PATH —
+# that product installs a bare `rutherford` binary and would race with the fork alias below.
 rutherford-mcp-server = "rutherford.server:main"
-# * Short alias for terminal subcommands (`rutherford trust` / `init` / `discover`); same entry as the MCP server.
+# * Fork short alias for terminal subcommands (`rutherford trust` / `init` / `discover`); same entry.
 rutherford = "rutherford.server:main"
 
 [dependency-groups]

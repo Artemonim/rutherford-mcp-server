@@ -22,17 +22,24 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # REQUIRED for the GitHub App credential exchange. Not for Anthropic model auth -- that is what
+      # claude_code_oauth_token below carries. With no `github_token` input this job is on
+      # claude-code-action's default GitHub App path, where the App trades this OIDC token for the
+      # credential that actually posts the reply; the grants above are all read and cannot. Removing
+      # it fails every run. To drop it, supply a `github_token` whose own scope permits posting; only
+      # if that token is ${{ secrets.GITHUB_TOKEN }} do you also need issues/pull-requests write here.
+      # See the action's docs/faq.md.
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 

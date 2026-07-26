@@ -783,6 +783,11 @@ def _trust_cli(args: list[str]) -> None:
     if len(path_args) > 1:
         print("rutherford trust: usage: trust [--list] [PATH]", file=sys.stderr)
         raise SystemExit(2)
+    if any(a == "" for a in path_args):
+        # * An empty PATH resolves to cwd, so `trust "$PROJECT_DIR"` with the variable unset would
+        # silently trust wherever the script happens to be running. Refuse instead of guessing.
+        print("rutherford trust: PATH must not be empty", file=sys.stderr)
+        raise SystemExit(2)
     workspace = path_args[0] if path_args else None
     try:
         result = trust_workspace(workspace)
@@ -797,6 +802,10 @@ def _untrust_cli(args: list[str]) -> None:
     path_args = [a for a in args if not a.startswith("-")]
     if len(path_args) > 1 or any(a.startswith("-") for a in args):
         print("rutherford untrust: usage: untrust [PATH]", file=sys.stderr)
+        raise SystemExit(2)
+    if any(a == "" for a in path_args):
+        # * See the note in _trust_cli: an empty PATH would silently mean cwd.
+        print("rutherford untrust: PATH must not be empty", file=sys.stderr)
         raise SystemExit(2)
     workspace = path_args[0] if path_args else None
     try:
@@ -871,7 +880,13 @@ def main() -> None:
     if smoke:
         print(f"rutherford: smoke ok -- {len(_APP.descriptors)} agents registered")
         return
-    mcp.run(show_banner=False)
+    # * Name the transport rather than inheriting it. FastMCP resolves an omitted transport through
+    # fastmcp.settings.transport, a pydantic-settings field with env_prefix "FASTMCP_" and .env support,
+    # so FASTMCP_TRANSPORT=http in the environment would otherwise start a Starlette HTTP server with no
+    # code change. Rutherford is an ACP orchestrator spoken to over stdio by an MCP client; the HTTP
+    # server stack arrives only as a transitive dependency and is neither used nor tested here. Pinning
+    # makes stdio an invariant instead of a default, which is what keeps that stack unreachable.
+    mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":

@@ -17,11 +17,6 @@ All notable changes to this project are documented in this file. The format is b
   family checks, dual independent sessions, unknown model) and
   `tests/integration/test_cursor_session_load.py` (`session/load` resume + known never-prompted load
   limitation). Marked `integration`; skipped without `cursor-agent`.
-- **`rutherford trust` / `rutherford untrust` CLI** — from a repo root, register (or remove) the current
-  directory in the platform global `trusted_workspaces` allowlist so `write` / `yolo` delegations pass the
-  trusted-workspace gate without a per-call `trust_workspace=true`. Optional path argument;
-  `trust --list` prints the global list. Creates the global `config.toml` when missing, preserves unrelated
-  keys, refuses a malformed file. Console script alias `rutherford` added alongside `rutherford-mcp-server`.
 - **Hard pre-prompt deadline (`ACP_PRE_PROMPT_TIMEOUT`)** — configurable via `default_pre_prompt_timeout_s`
   (default 90s), per-agent `pre_prompt_timeout_s`, env `RUTHERFORD_DEFAULT_PRE_PROMPT_TIMEOUT_S`, and
   per-call `pre_prompt_timeout_s` on `delegate` / panel tools / `continue_job` / `review`. Bounds sandbox
@@ -53,6 +48,73 @@ All notable changes to this project are documented in this file. The format is b
   lock family routing and `session/load` resume behaviour. Launch-argv routing itself already worked;
   this does not claim a routing fix. Cursor `pre_prompt_timeout_s = 300` recipe remains the sandbox
   budget guidance (global default stays 90s).
+
+## [3.1.0] - 2026-07-26
+
+### Added
+
+- **`trust` / `untrust` CLI for the global workspace allowlist** — from a repo root,
+  `python -m rutherford trust` registers (or `untrust` removes) the current directory in the platform
+  global `trusted_workspaces` allowlist, so `write` / `yolo` delegations pass the trusted-workspace gate
+  without a per-call `trust_workspace=true`. Takes an optional path argument; `trust --list` prints the
+  global list. Creates the global `config.toml` when missing, preserves unrelated keys and comments, and
+  refuses to run against a config that is already malformed. Rutherford reads config once at server start,
+  so restart or reconnect the server after a `trust` for it to take effect. Contributed by
+  [@Artemonim](https://github.com/Artemonim) in [#12].
+- **The allowlist writer validates before it writes.** The rewritten `config.toml` is rendered, parsed, and
+  round-trip-checked in memory and only then swapped into place with an atomic replace, so a path that
+  cannot be represented in TOML is refused with the existing config untouched rather than truncated. The
+  assignment scanner is string- and comment-aware, so a `[` or `]` inside a trusted path can no longer walk
+  past the end of the array and drop the `[agents.*]` tables below it. Unrelated keys and comments are kept
+  as written, while the block's own managed header is rewritten in place instead of accumulating a copy per
+  edit. Path quoting goes through the one shared hardened quoter (`io/tomltext.py`), and the file mode is
+  carried across the replace so an owner-only config does not widen to the umask default.
+
+### Fixed
+
+- **`setup` could write a `config.toml` it would then refuse to load.** Its TOML quoter escaped only
+  backslashes and double quotes, but on Linux and macOS a control character is a legal filename byte, so
+  running `setup --write --trust-workspace` from a directory holding one emitted an unparseable file --
+  and because `setup` never clobbers, it could not repair the file it had just written. Quoting is now a
+  single hardened implementation (`io/tomltext.py`) shared by every writer, escaping the full control
+  range and refusing outright a path with no TOML representation at all, before anything is opened.
+
+### Changed
+
+- **`discover`'s registry-directed-execution guard covers program runners, not just interpreters.** It
+  previously refused to launch an agent resolved to a shell or language runtime, but not to `pip`,
+  `cargo`, `go`, `git`, `docker`, `make`, `gh`, `kubectl`, `curl` or `xargs` -- each of which executes
+  attacker-chosen work from its own arguments as directly as `sh -c` does, and those arguments come from
+  the registry. All are now matched by the same leading-family classifier, which leaves longer names
+  alone (`goose`, `ghost` and `atlas` are unaffected). The guard is a denylist and its docstrings now say
+  so: it is defense in depth, and a name it does not match is unrecognized rather than vouched for.
+- **The ACP registry cache is written only after the response parses.** It was previously persisted
+  before validation, so a single malformed or hostile body became the fallback replayed on every later
+  network failure. A bad response now fails once and leaves a previously good cache intact.
+
+### Security
+
+- **Dependency advisories closed** in the development lockfile (`cryptography`, `mcp`,
+  `pydantic-settings`, `python-multipart`, `starlette`). Reported severity overstates the exposure here:
+  these are HTTP-server-stack advisories reached through `fastmcp`'s transitive dependencies, and
+  Rutherford serves over stdio, so none is reachable in a default deployment. `uv.lock` ships in neither
+  the wheel nor the sdist, so this affects contributors and CI rather than installed users.
+- **CI workflows pin an explicit `permissions: contents: read` ceiling.** The repository default is
+  already read-only, so nothing changes today; the block keeps a later settings change, or a job added to
+  those files, from silently gaining write. The code-review workflow now also skips cleanly on pull
+  requests from forks, which never receive repository secrets and so could only ever fail.
+
+### Documentation
+
+- **The trusted-workspace allowlist is documented end to end** — `docs/security.md` covers the
+  `trust` / `untrust` commands, the platform global config path, and the fact that a project-local
+  `trusted_workspaces` *replaces* rather than unions the global list at load time (previously undocumented
+  anywhere). `docs/troubleshooting.md` points `WORKSPACE_NOT_TRUSTED` at the one-shot CLI, and `README.md`
+  and `docs/configuration.md` follow.
+
+Thanks to [@Artemonim](https://github.com/Artemonim) for the trusted-workspace CLI contribution in [#12].
+
+[#12]: https://github.com/chapmanjw/rutherford-mcp-server/pull/12
 
 ## [3.0.7] - 2026-07-13
 
