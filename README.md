@@ -116,9 +116,9 @@ uv tool install rutherford-mcp-server
 # or: pipx install rutherford-mcp-server  /  pip install rutherford-mcp-server
 ```
 
-This puts the console entry points `rutherford-mcp-server` and `rutherford` on your PATH (same
-process; the short name is for terminal subcommands). The same command starts the stdio server on
-Windows, macOS, and Linux; `python -m rutherford` is equivalent.
+This puts the console entry point `rutherford-mcp-server` on your PATH. The same command starts the
+stdio server on Windows, macOS, and Linux; `python -m rutherford` is equivalent for terminal
+subcommands (`init`, `trust`, `untrust`, …).
 
 **2. Register it with your MCP client.**
 
@@ -141,7 +141,7 @@ with the interpreter from the environment where you installed it. More clients a
 run the one-shot CLI from your terminal:
 
 ```sh
-rutherford init          # or: rutherford-mcp-server init / python -m rutherford init  [--global] [--yes]
+rutherford-mcp-server init          # or: python -m rutherford init  [--global] [--yes]
 ```
 
 or, once it is registered with a client, ask for the `setup` tool:
@@ -156,9 +156,9 @@ To allow `write` / `yolo` delegations into the current repo without a per-call `
 register cwd in the global allowlist:
 
 ```sh
-rutherford trust                 # or: rutherford-mcp-server trust / python -m rutherford trust
-rutherford trust --list
-rutherford untrust               # removes cwd from the global allowlist
+rutherford-mcp-server trust           # adds cwd to global trusted_workspaces
+rutherford-mcp-server trust --list    # or: python -m rutherford trust --list
+rutherford-mcp-server untrust         # removes cwd from the global allowlist
 ```
 
 Config is read once at server start, so restart or reconnect the server for a new entry to take effect.

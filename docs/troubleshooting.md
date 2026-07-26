@@ -188,9 +188,9 @@ trusted_workspaces = ["/home/user/projects/myapp", "C:\\Users\\user\\projects\\m
 From the repo root, the one-shot CLI registers cwd in the **global** allowlist:
 
 ```sh
-rutherford trust                 # or: rutherford-mcp-server trust / python -m rutherford trust [/path]
-rutherford untrust               # remove cwd (or a path) from the global allowlist
-rutherford trust --list
+rutherford-mcp-server trust           # or: python -m rutherford trust [/path]
+rutherford-mcp-server untrust         # remove cwd (or a path) from the global allowlist
+rutherford-mcp-server trust --list
 ```
 
 Or set `RUTHERFORD_TRUSTED_WORKSPACES` (paths separated by `;` on Windows, `:` on POSIX).

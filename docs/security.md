@@ -83,9 +83,9 @@ Two ways to pass the gate:
    register the current directory in the **global** allowlist with:
 
    ```sh
-   rutherford trust              # or: rutherford-mcp-server trust / python -m rutherford trust
-   rutherford trust --list       # show the global allowlist
-   rutherford untrust            # remove cwd from the global allowlist
+   rutherford-mcp-server trust           # or: python -m rutherford trust
+   rutherford-mcp-server trust --list    # show the global allowlist
+   rutherford-mcp-server untrust         # remove cwd from the global allowlist
    ```
 
    `trust` / `untrust` edit only the platform global `config.toml`
