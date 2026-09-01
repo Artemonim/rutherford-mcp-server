@@ -57,7 +57,14 @@ from .host_env import claude_bedrock_env
 from .journal import EventJournal, journal_event_from_message
 from .launch import prepare_argv
 from .permission import PermissionPolicy
-from .teardown import count_descendants, reap, snapshot_descendants_eagerly
+from .teardown import (
+    await_without_cancelling,
+    consume_task_result,
+    count_descendants,
+    reap,
+    register_pending_cleanup,
+    snapshot_within_deadline,
+)
 
 #: How often the live observed-agent sampler walks the agent's process tree during a turn (N1, item 3). A
 #: coarse cadence: the sampler exists to catch a peak fan-out, not to track every transient process, and a
@@ -79,6 +86,9 @@ PromptBlock = (
 
 #: Teardown RPCs are best-effort and must not turn a finite request deadline into an infinite wait.
 _CANCEL_TIMEOUT_S = 1.0
+#: The pre-kill descendant enumeration. Bounded because it runs before the adapter kill: a stage that can
+#: hang there strands the adapter, so a partial descendant list is strictly better than no teardown.
+_SNAPSHOT_TIMEOUT_S = 3.0
 _TERMINAL_SHUTDOWN_TIMEOUT_S = 4.0
 _DESCENDANT_REAP_TIMEOUT_S = 3.0
 _DIRECT_PROCESS_KILL_WAIT_S = 2.0
@@ -86,16 +96,7 @@ _DIRECT_PROCESS_KILL_WAIT_S = 2.0
 _TRANSPORT_CLOSE_TIMEOUT_S = 5.0
 #: ``close`` returns after this caller budget while its instance-owned teardown task continues in the background.
 _SESSION_CLOSE_WAIT_S = 15.0
-#: A session retains only a small fixed number of late cleanup tasks; completed entries remove themselves.
-_MAX_RETAINED_CLEANUPS = 8
-
 _T = TypeVar("_T")
-
-
-def _consume_task_result(task: asyncio.Task[Any]) -> None:
-    """Consume a detached task's terminal result so best-effort cleanup never emits an unhandled exception."""
-    with contextlib.suppress(BaseException):
-        task.result()
 
 
 class ACPHandshakeError(Exception):
@@ -241,7 +242,6 @@ class ACPSession:
         self._pid: int | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._close_task: asyncio.Task[None] | None = None
-        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
         #: The model ids the agent advertised at session open (``session.models``), captured so a caller can
         #: see what the agent offered -- the "configure" signal of a handshake-only connection check. ``[]``
         #: when the agent advertises no selectable models (it runs on its own default).
@@ -466,7 +466,7 @@ class ACPSession:
             )
             raise handshake_error from exc
 
-    async def _open_body(self) -> None:
+    async def _open_body(self) -> None:  # noqa: PLR0915 - spawn, handshake, session, model/effort, and pre-prompt budget
         """Spawn the agent and complete the handshake stages (the body of :meth:`open`)."""
         # Layer this turn's effort override onto the launch: extra env on top of the resolved environment, and
         # extra args appended to the agent's own argv (e.g. cline's ``--thinking high``). A model-id-encoding
@@ -578,48 +578,43 @@ class ACPSession:
                     timing={"stage_elapsed_s": round(time.monotonic() - init_started, 3)},
                 )
                 raise handshake_error from exc
-            # Resume a prior session (session/load) when asked, else create a fresh one (session/new). The
-            # resume path is gated on the agent's advertised loadSession capability and fails RESUME_FAILED if
-            # unsupported.
-            session: NewSessionResponse | LoadSessionResponse
-            self._pre_prompt_stage = "session"
-            session_started = time.monotonic()
-            self._trace_open_stage("session", "enter")
+            # Everything below runs with the agent process ALREADY spawned and registered on the exit stack,
+            # and open() is entered via ``async with`` in run_acp_turn -- Python skips ``__aexit__`` when
+            # ``__aenter__`` raises, so ANY exception escaping here without a teardown orphans that process tree
+            # with nothing left holding a reference to it. The guard is therefore structural rather than
+            # per-call-site: it covers the session RPC, the plain reads of what that RPC returned, and model /
+            # effort selection, so a post-handshake step added here later inherits the teardown instead of
+            # having to remember it. ``_new_session`` / ``_resume`` still close on the faults they RAISE and
+            # that stays as the first line of defence -- ``close`` is idempotent (it awaits one instance-owned
+            # teardown task), so the redundancy costs nothing -- but a helper can only guard the failures it
+            # raises, never the ones that happen while READING what it returned. That gap is exactly what let a
+            # capability blob the ACP SDK had salvaged into a raw dict AttributeError straight out of open()
+            # with the adapter still running.
             try:
+                session: NewSessionResponse | LoadSessionResponse
+                self._pre_prompt_stage = "session"
+                session_started = time.monotonic()
+                self._trace_open_stage("session", "enter")
                 if self._resume_session_id is not None:
                     session = await self._resume(conn, init)
                 else:
                     session = await self._new_session(conn)
-            except ACPHandshakeError as exc:
                 self._trace_open_stage(
                     "session",
                     "exit",
-                    status="failed",
-                    error=self._trace_handshake_error(exc),
+                    status="ok",
                     timing={"stage_elapsed_s": round(time.monotonic() - session_started, 3)},
                 )
-                raise
-            self._trace_open_stage(
-                "session",
-                "exit",
-                status="ok",
-                timing={"stage_elapsed_s": round(time.monotonic() - session_started, 3)},
-            )
-            # * Legacy SessionModelState (session.models) is optional: ACP SDK 0.11+ removes the field; access
-            # only via defensive helpers so a config-only response never AttributeErrors before launch validation.
-            self._available_models = _models_of(session)
-            self._config_options = list(getattr(session, "config_options", None) or [])
-            # Capture the SECOND model channel (a configOptions "model" select option) so available_models can
-            # report the union -- claude_code's adapter advertises its models here, not in SessionModelState.
-            model_option = _model_config_option(self._config_options)
-            self._config_model_values = list(model_option[2]) if model_option is not None else []
-            # Model / effort selection runs AFTER the agent process is spawned and can raise ACPHandshakeError
-            # (e.g. MODEL_UNAVAILABLE for an unadvertised model). open() is entered via ``async with`` in
-            # run_acp_turn, so Python skips ``__aexit__`` when open() raises -- tear the agent down here before
-            # propagating, or the spawned process leaks just as an unguarded handshake read would. The earlier
-            # initialize / _new_session / _resume steps already close on their own faults; this guards the
-            # post-session-open steps, which under the confirmed-selection contract are no longer best-effort.
-            try:
+                # * Legacy SessionModelState (session.models) is optional: ACP SDK 0.11+ removes the field;
+                # access only via defensive helpers so a config-only response never AttributeErrors before
+                # launch validation.
+                self._available_models = _models_of(session)
+                self._config_options = list(getattr(session, "config_options", None) or [])
+                # Capture the SECOND model channel (a configOptions "model" select option) so available_models
+                # can report the union -- claude_code's adapter advertises its models here, not in
+                # SessionModelState.
+                model_option = _model_config_option(self._config_options)
+                self._config_model_values = list(model_option[2]) if model_option is not None else []
                 self._pre_prompt_stage = "model_selection"
                 model_started = time.monotonic()
                 self._trace_open_stage("model_selection", "enter")
@@ -690,16 +685,31 @@ class ACPSession:
         persist and reload its own sessions cannot resume, so a resume against it is a clean ``RESUME_FAILED``
         rather than a silent fresh session. ``session/load`` does not mint a new id -- the loaded session keeps
         the requested one. SAFE re-execution: the resume is pre-prompt, with no side effect or cost.
+
+        The capability is read through :func:`_load_session_capability`, never off the response attribute: ACP
+        0.12 salvages a malformed ``agentCapabilities`` into a raw dict instead of failing the payload, so the
+        attribute's declared type no longer describes what is there. An unreadable blob refuses the resume with
+        its own wording -- it is not the same fact as an agent that answered and said it cannot reload, and an
+        operator debugging one should not be told the other.
         """
         resume_id = self._resume_session_id
-        assert resume_id is not None  # guarded by the caller (only taken when a resume id is set)
-        caps = init.agent_capabilities
-        if caps is None or not caps.load_session:
+        assert resume_id is not None  # noqa: S101 - guarded by the caller (only taken when a resume id is set); narrowing for mypy, not a runtime check
+        advertised = _load_session_capability(init)
+        if advertised is not True:
             await self.close()
+            if advertised is False:
+                detail = (
+                    "it does not advertise the ACP loadSession capability (it does not persist sessions for reload)"
+                )
+            else:
+                detail = (
+                    "its initialize response carried a malformed agentCapabilities blob (ACP 0.12 salvages one "
+                    "into all-false defaults instead of failing the handshake), so no loadSession "
+                    "advertisement could be read"
+                )
             raise ACPHandshakeError(
                 ErrorCode.RESUME_FAILED,
-                f"{self._descriptor.id} cannot resume a session: it does not advertise the ACP loadSession "
-                "capability (it does not persist sessions for reload)",
+                f"{self._descriptor.id} cannot resume a session: {detail}",
                 ReexecutionSafety.SAFE,
             )
         try:
@@ -717,7 +727,7 @@ class ACPSession:
         self._session_id = resume_id
         return session
 
-    async def _select_model(
+    async def _select_model(  # noqa: C901 - two model channels plus their fallbacks, enumerated once
         self, conn: ClientSideConnection, session: NewSessionResponse | LoadSessionResponse
     ) -> None:
         """Select or validate the effective model across ACP channels.
@@ -776,7 +786,7 @@ class ACPSession:
             return
         # * Prefer the verifiable config-option channel whenever it advertises the target.
         if in_config:
-            assert found is not None  # narrowed by in_config
+            assert found is not None  # noqa: S101 - narrowed by in_config; narrowing for mypy, not a runtime check
             config_id, current, _values = found
             if current == model:
                 self._selected_model = model
@@ -1037,16 +1047,6 @@ class ACPSession:
         result.selected_model = self._selected_model
         return result
 
-    def _retain_cleanup_task(self, task: asyncio.Task[Any]) -> None:
-        """Retain a bounded number of late cleanup tasks and consume every task's terminal result."""
-        task.add_done_callback(_consume_task_result)
-        for completed in tuple(self._cleanup_tasks):
-            if completed.done():
-                self._cleanup_tasks.discard(completed)
-        if len(self._cleanup_tasks) < _MAX_RETAINED_CLEANUPS:
-            self._cleanup_tasks.add(task)
-            task.add_done_callback(self._cleanup_tasks.discard)
-
     async def _bounded_cleanup(
         self,
         coro: Coroutine[Any, Any, _T],
@@ -1056,19 +1056,35 @@ class ACPSession:
         default: _T,
         cancel_on_timeout: bool = True,
     ) -> _T:
-        """Await one cleanup step under a hard deadline while retaining bounded late work on this session."""
+        """Await one cleanup step under a hard deadline; late work keeps the shared owner either way.
+
+        ``cancel_on_timeout`` decides only what the deadline does to the WORK. A step that is pure waiting
+        is cancelled, because abandoning the wait is the whole point and nothing is lost: ``session/cancel``
+        hands a fully serialized line to the sender's own queue task, so giving up on the reply cannot
+        truncate a write or strip the connection of anything.
+
+        Every other step here must NOT be cancelled, and the test is whether the work can be REDONE, not
+        whether it looks like waiting. Reaping a captured process tree obviously cannot -- nothing else
+        knows that tree. Closing the transport looks like it could, and cannot: the SDK latches
+        ``_closed`` before awaiting its own cleanup, so a cancel in the middle makes every later attempt a
+        no-op and strands whatever had not run yet. Such a step defers to
+        :func:`await_without_cancelling`, which bounds the wait and leaves the work to finish.
+
+        Retention is NOT part of that choice, which is where this diverged from the terminal path before:
+        the session used to keep its own capped set and silently stopped backing tasks past the cap, so a
+        busy teardown could drop exactly the work this deadline promised to let finish.
+        """
+        if not cancel_on_timeout:
+            return await await_without_cancelling(coro, timeout_s=timeout_s, task_name=task_name, default=default)
         task = asyncio.create_task(coro, name=task_name)
+        register_pending_cleanup(task)
         try:
             done, _ = await asyncio.wait({task}, timeout=timeout_s)
         except asyncio.CancelledError:
-            if cancel_on_timeout:
-                task.cancel()
-            self._retain_cleanup_task(task)
+            task.cancel()
             raise
         if task not in done:
-            if cancel_on_timeout:
-                task.cancel()
-            self._retain_cleanup_task(task)
+            task.cancel()
             return default
         try:
             return task.result()
@@ -1082,12 +1098,12 @@ class ACPSession:
         # * The descendant snapshot is complete before this call, so a hard kill freezes the tree before reap.
         with contextlib.suppress(ProcessLookupError, OSError):
             process.kill()
-        wait_task = asyncio.create_task(process.wait(), name="rutherford-acp-direct-process-wait")
-        done, _ = await asyncio.wait({wait_task}, timeout=_DIRECT_PROCESS_KILL_WAIT_S)
-        if wait_task not in done:
-            self._retain_cleanup_task(wait_task)
-            return
-        _consume_task_result(wait_task)
+        await await_without_cancelling(
+            process.wait(),
+            timeout_s=_DIRECT_PROCESS_KILL_WAIT_S,
+            task_name="rutherford-acp-direct-process-wait",
+            default=None,
+        )
 
     async def cancel(self) -> None:
         """Best-effort bounded ``session/cancel`` for an in-flight turn; never raises operational failures."""
@@ -1100,13 +1116,19 @@ class ACPSession:
             )
 
     async def close(self) -> None:
-        """Wait boundedly for one shared teardown task without letting caller cancellation abort process cleanup."""
+        """Wait boundedly for one shared teardown task without letting caller cancellation abort process cleanup.
+
+        The aggregate goes to the same owner as the stages inside it. The instance attribute alone is not
+        enough: this caller budget is deliberately shorter than the stages it covers can take in the worst
+        case, so ``close`` can return while ``_close_body`` is still running, and a session dropped in that
+        window would leave the loop holding its teardown by a weak reference only.
+        """
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close_body(), name="rutherford-acp-session-close")
-            self._close_task.add_done_callback(_consume_task_result)
+            register_pending_cleanup(self._close_task)
         done, _ = await asyncio.wait({self._close_task}, timeout=_SESSION_CLOSE_WAIT_S)
         if self._close_task in done:
-            _consume_task_result(self._close_task)
+            consume_task_result(self._close_task)
 
     async def _close_body(self) -> None:
         """Snapshot the live tree, kill its spawning parent, reap descendants, then close the ACP transport.
@@ -1122,8 +1144,11 @@ class ACPSession:
         descendants: list[Any] = []
         try:
             if pid is not None:
-                with contextlib.suppress(Exception):
-                    descendants = await snapshot_descendants_eagerly(pid)
+                # * Bounded like every other stage. The snapshot runs FIRST, so an unbounded one never
+                # returns, the body never reaches the kill below, and the `finally` never runs either --
+                # a `finally` only fires when its block exits. The adapter would then outlive the server
+                # process, which is the exact leak this teardown path exists to prevent.
+                descendants = await snapshot_within_deadline(pid, timeout_s=_SNAPSHOT_TIMEOUT_S, source="session")
             # * Kill the spawning adapter immediately after its tree snapshot so it cannot create replacements.
             await self._kill_direct_process(process)
             # * Brokered commands retain their own shared kill tasks if this bounded aggregate is still running.
@@ -1142,11 +1167,20 @@ class ACPSession:
                     default=None,
                     cancel_on_timeout=False,
                 )
+            # * NOT cancellable, despite looking like the most cancellable stage here. The stack's exit
+            # runs the SDK's `Connection.close` (acp/connection.py), which sets `_closed = True` and only
+            # THEN awaits its dispatcher stop, sender close, and task shutdown; `MessageSender.close`
+            # (acp/task/sender.py) latches the same way. A cancel landing in the middle leaves the later
+            # steps undone forever, because the flag is already set and every future `close()` returns
+            # immediately -- there is no second chance to finish them. Bounding the wait is all that was
+            # ever needed here: the adapter is hard-killed above and again in the `finally`, so the EOF
+            # this used to block on has already been delivered and the close completes on its own.
             await self._bounded_cleanup(
                 self._stack.aclose(),
                 timeout_s=_TRANSPORT_CLOSE_TIMEOUT_S,
                 task_name="rutherford-acp-transport-close",
                 default=None,
+                cancel_on_timeout=False,
             )
         finally:
             # * Event-loop shutdown can cancel the shared task; the direct adapter still receives a hard kill.
@@ -1351,6 +1385,44 @@ def _launch_model_advertised(model: str, advertised: list[str]) -> bool:
     return any(launch_advertisement_compatible(model, item) for item in advertised)
 
 
+def _load_session_capability(init: object) -> bool | None:
+    """Whether the agent advertised the ACP ``loadSession`` capability, or ``None`` when that cannot be read.
+
+    Never touch ``InitializeResponse.agent_capabilities`` directly. Its ``AgentCapabilities | None`` annotation
+    stopped being a guarantee in ACP SDK 0.12, which made deserialization lenient: the field carries a
+    salvage-on-error wrap validator whose fallback substitutes a RAW DICT of all-false capability defaults when
+    an agent sends a blob that fails validation, where 0.11 rejected the whole payload. A wrap validator's
+    return value is not re-validated, so at runtime the attribute really is a ``dict`` while a type checker
+    still reads the annotation and sees a model -- it cannot catch the ``caps.load_session`` AttributeError
+    that follows, and neither can a test whose fake agent only ever builds a well-formed response.
+
+    That AttributeError is not merely an ugly error. It is raised after the agent subprocess is spawned and
+    from inside ``__aenter__``, which Python answers by skipping ``__aexit__`` -- the orphaned-process class
+    this module's teardown exists to prevent. So the capability gets the same discipline :func:`_models_of`
+    applies to the legacy ``session.models`` channel, for the same reason: an SDK-typed field whose value an
+    agent controls is untrusted input, and this codebase reads untrusted input through a helper.
+
+    Three outcomes, kept distinct so the caller can say WHY a resume was refused. ``True``: advertised.
+    ``False``: the agent answered and the answer was no (including a well-formed response that omits
+    capabilities entirely -- omitting an advertisement is a plain "no"). ``None``: nothing could be read.
+
+    A ``dict`` is reported unreadable rather than mined for a ``loadSession`` key, and that is deliberate
+    rather than lazy. Measured against the 0.12.0 wheel, the attribute is only ever a ``dict`` when the whole
+    field failed validation, and the fallback the SDK substitutes is a hard-coded literal -- so its
+    ``loadSession`` is always ``False`` no matter what the agent sent. A mapping the agent actually supplied
+    still coerces to a real ``AgentCapabilities``, salvaging per-field. Reading the dict would therefore report
+    the SDK's placeholder as the agent's own answer, telling an operator their agent cannot reload sessions
+    when the truth is that it is emitting invalid protocol.
+    """
+    caps = getattr(init, "agent_capabilities", None)
+    if caps is None:
+        return False
+    if isinstance(caps, dict):
+        return None
+    advertised = getattr(caps, "load_session", None)
+    return advertised if isinstance(advertised, bool) else None
+
+
 def _config_option_current_equals(response: object, config_id: str, model: str) -> bool:
     """Whether a ``set_config_option`` response confirms ``config_id``'s ``current_value`` equals ``model``."""
     options = getattr(response, "config_options", None)
@@ -1433,6 +1505,29 @@ def _parse_model_option(option: object) -> tuple[str, str | None, list[str]] | N
     return config_id, (current if isinstance(current, str) else None), selectable
 
 
+_NON_MODEL_CATEGORIES = frozenset({"mode", "model_config", "thought_level"})
+
+
+def _option_category(option: object) -> str | None:
+    """This config option's semantic ACP category as a plain string, or ``None`` when it carries none we can read.
+
+    ACP's own ``SessionConfigOptionCategory`` is a closed-ish set of STRINGS -- ``mode`` / ``model`` /
+    ``model_config`` / ``thought_level``, plus any other string (names not starting with ``_`` are reserved
+    for the spec, ``_``-prefixed ones are free for vendor use). There is no object form of a category on the
+    wire in any published schema version. The ACP SDK 0.12.0 nonetheless generates the field as
+    ``Optional[Union[str, Dict[str, Any]]]`` -- a code-generation artifact of that multi-variant ``anyOf``,
+    not a protocol change -- so from 0.12.0 on, a malformed object-valued ``category`` PARSES into a raw dict
+    where 0.11.0's ``Optional[str]`` rejected the whole payload and raised it as a loud ACP_HANDSHAKE_FAILED.
+    Comparing that dict against a category name would just evaluate False, which is the silent-mismatch shape
+    this codebase refuses: the reader cannot tell a deliberate "no match" from an unhandled type. So narrow to
+    ``str`` here, once, and report anything else as UNTAGGED -- which is also what the spec demands of us, in
+    its own words: a category "MUST NOT be required for correctness. Clients MUST handle missing or unknown
+    categories gracefully."
+    """
+    category = getattr(option, "category", None)
+    return category if isinstance(category, str) else None
+
+
 def _model_config_option(options: list[object]) -> tuple[str, str | None, list[str]] | None:
     """The advertised model SELECT config option as ``(config_id, current_value, selectable_values)``, or ``None``.
 
@@ -1442,16 +1537,24 @@ def _model_config_option(options: list[object]) -> tuple[str, str | None, list[s
     like ``default`` / ``sonnet`` / ``haiku``). A semantic ``category == "model"`` option is AUTHORITATIVE; only
     when none is advertised does a literal ``id == "model"`` option serve as the fallback -- two passes so the
     advertised ORDER cannot let the id fallback win over a category-tagged option (a UX category is optional, so
-    the id is the fallback, not a co-equal match).
+    the id is the fallback, not a co-equal match). The category is authoritative in BOTH directions: an option
+    the agent explicitly tagged with a spec-reserved category naming a *different* channel (``mode``,
+    ``model_config``, ``thought_level``) is disqualified from the id fallback, so a mode selector that happens
+    to be keyed ``model`` cannot be driven as the model channel. Unknown and ``_``-prefixed vendor categories
+    are deliberately NOT disqualifying -- the spec reserves those for custom use, and an agent is free to put
+    one on its genuine model selector, so those still reach the id fallback.
     """
     for option in options:
-        if getattr(option, "category", None) == "model":
+        if _option_category(option) == "model":
             parsed = _parse_model_option(option)
             if parsed is not None:
                 return parsed
     for option in options:
-        if getattr(option, "id", None) == "model":
-            parsed = _parse_model_option(option)
-            if parsed is not None:
-                return parsed
+        if getattr(option, "id", None) != "model":
+            continue
+        if _option_category(option) in _NON_MODEL_CATEGORIES:
+            continue  # a spec-reserved category naming a DIFFERENT channel outranks a coincidental id
+        parsed = _parse_model_option(option)
+        if parsed is not None:
+            return parsed
     return None

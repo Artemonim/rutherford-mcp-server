@@ -43,7 +43,7 @@ def _lifecycle_lines(stream: io.StringIO) -> list[dict[object, object]]:
 
 def test_path_leaf_and_launch_basename_never_emit_full_paths() -> None:
     assert path_leaf(r"G:\Users\secret\project") == "project"
-    assert path_leaf("/tmp/rutherford-sandbox-abc/copy") == "copy"
+    assert path_leaf("/tmp/rutherford-sandbox-abc/copy") == "copy"  # noqa: S108 - path-leaf fixture, not a real tmp write
     assert launch_command_basename(r"C:\Program Files\nodejs\node.exe") == "node.exe"
     assert launch_command_basename(None) is None
 
@@ -58,7 +58,7 @@ def test_path_leaf_and_launch_basename_never_emit_full_paths() -> None:
         ("./relative-leaf", "relative-leaf"),
         ("../relative-leaf", "relative-leaf"),
         # * POSIX absolute (must reduce on Windows hosts too).
-        ("/tmp/rutherford-sandbox-abc/copy", "copy"),
+        ("/tmp/rutherford-sandbox-abc/copy", "copy"),  # noqa: S108 - path-leaf fixture, not a real tmp write
         ("/var/log/", "log"),
         # * Windows absolute (must reduce on POSIX hosts too).
         (r"G:\Users\secret\project", "project"),
@@ -66,11 +66,11 @@ def test_path_leaf_and_launch_basename_never_emit_full_paths() -> None:
         # * Mixed separators.
         (r"G:\Users\secret/project", "project"),
         (r"C:/Users/secret\project", "project"),
-        ("/tmp/mixed\\leaf", "leaf"),
+        ("/tmp/mixed\\leaf", "leaf"),  # noqa: S108 - path-leaf fixture, not a real tmp write
         # * Trailing separators.
-        ("/tmp/foo/", "foo"),
+        ("/tmp/foo/", "foo"),  # noqa: S108 - path-leaf fixture, not a real tmp write
         (r"G:\Users\secret\project\\", "project"),
-        ("/tmp/foo///", "foo"),
+        ("/tmp/foo///", "foo"),  # noqa: S108 - path-leaf fixture, not a real tmp write
         # * Root / drive edge cases -- no full path, no drive residue.
         ("/", None),
         ("\\", None),

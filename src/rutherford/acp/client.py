@@ -51,7 +51,7 @@ from acp import RequestError
 
 from .journal import EventJournal, JournalEvent
 from .permission import PermissionPolicy
-from .teardown import reap, snapshot_descendants_eagerly
+from .teardown import await_without_cancelling, reap, snapshot_within_deadline
 
 #: JSON-RPC error code Rutherford returns when it declines an agent callback (an internal-error code; the
 #: protocol has no dedicated "permission denied" callback code, so the message carries the reason).
@@ -67,6 +67,17 @@ _TERMINAL_TIMEOUT_S = 120.0
 _TERMINAL_OUTPUT_CAP = 1 * 1024 * 1024
 #: Maximum wait after a hard kill before terminal teardown proceeds to descendant reap and reader cancellation.
 _TERMINAL_KILL_WAIT_S = 2.0
+#: How long teardown waits for that exit-status collection overall. Larger than the value above on purpose:
+#: ``Popen.wait``'s own timeout does not start until an executor worker picks the job up, so a deadline equal
+#: to it would expire on scheduling delay alone and report a wedge that is really just a queue. The extra
+#: budget is the scheduling slack, not a second wait -- teardown proceeds either way, so this only decides
+#: how long it pauses before moving on.
+_TERMINAL_KILL_WAIT_TOTAL_S = _TERMINAL_KILL_WAIT_S + 2.0
+#: Deadline on the pre-kill descendant enumeration. Mirrors the session teardown bound: losing the
+#: descendant list costs some orphans, while an unbounded snapshot strands the command itself.
+_TERMINAL_SNAPSHOT_TIMEOUT_S = 3.0
+#: Deadline on reaping that tree, matching the session's own reap stage.
+_TERMINAL_REAP_TIMEOUT_S = 3.0
 
 
 def _confine(root: Path, raw_path: str) -> Path:
@@ -150,18 +161,44 @@ class _BrokeredTerminal:
         try:
             if self.process.poll() is None:
                 with contextlib.suppress(Exception):
-                    descendants = await snapshot_descendants_eagerly(self.process.pid)
+                    # * The SAME helper the session teardown uses, not a parallel implementation. Both are
+                    # pre-kill snapshots with the same two requirements -- bound it so the kill below is
+                    # always reached, and reap a late result rather than drop it -- and keeping two copies
+                    # is exactly how the terminal path ended up bounded but still discarding.
+                    #
+                    # The stakes are higher here, not lower: a brokered terminal is a child of the SERVER,
+                    # not the adapter, so the session's reap walks a different tree and never collects it.
+                    # A dropped tree here outlives the run holding the sandbox cwd.
+                    descendants = await snapshot_within_deadline(
+                        self.process.pid,
+                        timeout_s=_TERMINAL_SNAPSHOT_TIMEOUT_S,
+                        source="terminal",
+                    )
         finally:
             # * The direct command is killed even if snapshot enumeration or its waiter is cancelled.
             if self.process.poll() is None:
                 with contextlib.suppress(OSError):  # pragma: no cover - already dead
                     self.process.kill()
         if self.process.poll() is None:
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                await asyncio.to_thread(self.process.wait, _TERMINAL_KILL_WAIT_S)
+            # * `Popen.wait`'s own timeout only starts counting once a worker picks the job up, so on a
+            # saturated executor this can sit queued indefinitely and teardown never reaches the reap.
+            await await_without_cancelling(
+                asyncio.to_thread(self.process.wait, _TERMINAL_KILL_WAIT_S),
+                timeout_s=_TERMINAL_KILL_WAIT_TOTAL_S,
+                task_name=f"rutherford-terminal-wait-{self.process.pid}",
+                default=None,
+            )
         if descendants:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(reap, descendants)
+            # * Bound the WAIT, not the reap. `wait_for` would cancel it, and a `to_thread` still queued on
+            # a saturated executor has not started -- so the cancel succeeds and the reap never happens,
+            # dropping a tree that was already captured. Saturation is the very condition this deadline is
+            # for, so cancelling there turns "slow" into "never". The session reap already had this right.
+            await await_without_cancelling(
+                asyncio.to_thread(reap, descendants),
+                timeout_s=_TERMINAL_REAP_TIMEOUT_S,
+                task_name=f"rutherford-terminal-reap-{self.process.pid}",
+                default=None,
+            )
         if not self._reader.done():
             self._reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -189,7 +226,10 @@ class TerminalBroker:
         for var in env or []:
             child_env[var.name] = var.value
         try:
-            process = subprocess.Popen(  # noqa: ASYNC220,S603 - long-lived process drained off-thread, not awaited
+            # S603: argv comes from the closed descriptor registry plus operator config, never from the model
+            # driving the tool. An operator who writes a hostile `command` in their own config has already
+            # chosen to run it; nothing here can or should second-guess that.
+            process = subprocess.Popen(  # noqa: S603, ASYNC220 - long-lived process drained off-thread
                 argv,
                 cwd=str(self._root),
                 env=child_env,
@@ -348,7 +388,22 @@ class RutherfordACPClient:
             Path(target).parent.mkdir(parents=True, exist_ok=True)
             Path(target).write_text(content, encoding="utf-8")
 
-        await asyncio.to_thread(_write)
+        # * Wrap the OSError exactly as read_text_file does above, for a reason that only became
+        # load-bearing with ACP SDK 0.12. Its request dispatch catches RequestError first and re-raises it
+        # WITHOUT logging; anything else falls to a branch that now calls logging.exception (0.11 converted
+        # it to a JSON-RPC internal error silently). So a bare OSError here became a traceback -- and the SDK
+        # logs through the ROOT logger, whose first record installs a synchronous stderr handler via
+        # basicConfig, so it is written from the event loop thread. Worse, an OSError's str() carries the
+        # filename it failed on, which is `target`: the RESOLVED absolute sandbox path, not the relative one
+        # the agent asked for. A path component that exists as a regular file is enough to trigger it --
+        # mkdir(exist_ok=True) re-raises when the entry is not a directory. Raising RequestError keeps the
+        # failure a clean protocol error the agent can act on and keeps the absolute path out of the log
+        # entirely. Deliberately NOT journaled: fs_write_denied means the policy refused, and a failed write
+        # is not a refusal -- read_text_file draws the same line.
+        try:
+            await asyncio.to_thread(_write)
+        except OSError as exc:
+            raise RequestError(_DECLINED, f"could not write {path}: {exc}") from exc
         self.journal.append(JournalEvent(kind="fs_write", detail=path))
         return None
 

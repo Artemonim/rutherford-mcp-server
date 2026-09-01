@@ -40,6 +40,36 @@ All notable changes to this project are documented in this file. The format is b
   stay local operator observability. Reflected in troubleshooting, recipes, MCP client integration,
   README jobs notes, and related security checklist / config log wording.
 
+- **`direct_workspace_mutation` on `delegate`, behind an operator opt-in** — a `write` / `yolo` agent can
+  edit `working_dir` itself, with live terminal access there, instead of the isolated worktree. This is for
+  work whose product is the effect on the tree rather than a diff: installing dependencies, running local
+  tooling, letting an agent see its own side effects. Contributed by
+  [@Artemonim](https://github.com/Artemonim) in [#21].
+
+  It gives up everything the sandbox provides — the clobber and concurrent-edit guards, symlink containment,
+  the committed-`HEAD` starting point, and the diff itself — so the run leaves no record of what it changed
+  and a failure may leave a partial one. The party asking for that is also the party least able to judge it,
+  so a request never suffices on its own. An operator has to enable
+  `allow_direct_workspace_mutation` in config, and the directory has to be on the `trusted_workspaces`
+  allowlist: a per-call `trust_workspace=true` deliberately does NOT qualify, because a caller that can set
+  it could otherwise authorise its own unsandboxed writes and the allowlist would decide nothing.
+  `working_dir` must be named explicitly rather than inherited from the server's own directory, the call
+  must not be nested inside another delegation, and `propose` cannot use it at all.
+
+  Each admitted run logs before launch and again on completion, and the result carries
+  `direct_mutation=true` so a reader can tell the absent diff means "never captured" rather than "nothing
+  was written". That record is **best effort**: it goes through the ordinary structured logger, whose
+  stderr sink is asynchronous so a host that never drains its pipe cannot freeze the event loop, which
+  means the record can be dropped under log saturation or lost if the process dies before it is written.
+  `docs/security.md` says so plainly and points an operator who needs a durable trail at collecting stderr
+  or enabling persistence, both of which live outside this process. Refusing to launch unless the write was
+  confirmed was built and removed; the reasoning is recorded in `docs/security.md` rather than the code.
+
+  The nesting condition is documented as defence in depth rather than a boundary. Depth crosses the process
+  boundary in an environment variable, and anything able to spawn a nested Rutherford controls that child's
+  environment, so it stops an accident rather than a hostile agent — which, per `docs/security.md`, gains
+  nothing here it did not already have, since a `write` / `yolo` agent was never OS-jailed.
+
 ### Changed
 
 - **Clarified and regression-tested Cursor launch-argv model routing** — troubleshooting documents that
@@ -48,6 +78,141 @@ All notable changes to this project are documented in this file. The format is b
   lock family routing and `session/load` resume behaviour. Launch-argv routing itself already worked;
   this does not claim a routing fix. Cursor `pre_prompt_timeout_s = 300` recipe remains the sandbox
   budget guidance (global default stays 90s).
+
+- **The ACP SDK is now pinned to 0.12, and read as an untrusted source rather than a validating one.** The
+  0.11 pin was raised after checking what actually changed: the protocol version is unchanged, both model
+  channels are intact, and one unused public name went away. What did change is deserialization, and it
+  changes what the library promises rather than what it exposes. A field the SDK cannot parse is no longer
+  rejected — it is salvaged into a raw dictionary and returned through an attribute still annotated as a
+  model — and an unparseable item in a list is now skipped so the rest of the list can parse, where the whole
+  response used to fail.
+
+  Both behaviours are reasonable for a protocol library and neither is announced at a call site, which is the
+  problem: they silently retire validation this client was leaning on. Nothing here reads an agent-controlled
+  response field off its annotation any more. The pin is one exact release rather than a range or a minor
+  wildcard, because the lock file is not shipped and the published install command carries no constraint of
+  its own, so this is the only bound that reaches a user. A minor wildcard would not have helped: `==0.12.*`
+  and `<0.13` admit the same unreleased 0.12.z patches, and the lesson of this very bump is that a
+  compatible-looking release can retire validation without touching a signature. Only the release actually
+  run through the malformed-payload suite is claimed.
+
+### Fixed
+
+- **A malformed `agentCapabilities` from an agent no longer crashes a resume and orphans its process.** Under
+  the new lenient deserialization, an `initialize` response whose capability blob fails validation arrives as
+  a plain dictionary instead of raising. The resume gate read `load_session` straight off it and raised
+  `AttributeError` — after the agent was spawned, outside every handshake guard, and from inside the context
+  manager's entry, which Python answers by skipping its exit. The subprocess was left running with nothing
+  holding a reference to it. The capability is now read through a helper that reports advertised, not
+  advertised, or unreadable, and an unreadable blob is a clean `RESUME_FAILED` that says so rather than
+  claiming the agent does not support resume. The two are different facts and an operator debugging one
+  should not be handed the other.
+
+  The teardown fix is deliberately wider than the read that exposed it. Every step in session open that runs
+  after the agent is spawned — creating or loading the session, reading what came back, and model and effort
+  selection — now sits inside one guard that closes on any exception, so a step added there later inherits
+  the teardown instead of having to remember it. Only the capability read was defective; the guard is
+  structural so the next one cannot be.
+
+- **A config option tagged with a foreign category is no longer driven as the model channel.** The SDK now
+  generates a config option's `category` as either a string or an object, an artifact of how the schema
+  describes it — every category the protocol actually defines is a string. An object-valued category
+  therefore parses where it used to be rejected, and comparing it against a category name quietly evaluated
+  false. It is now narrowed to a string once and reported as untagged otherwise, which is what the protocol
+  asks of clients: an unknown category must be handled gracefully, never required for correctness.
+
+  Completing that discriminator exposed a second defect and fixed it. The category was already documented as
+  authoritative over the fallback that matches an option whose id is literally `model`, but that was only
+  honoured in one direction. An option the agent explicitly tagged as a mode, a model parameter, or a thought
+  level is now disqualified from the id fallback, so a mode selector that happens to be keyed `model` can no
+  longer be driven as the model channel and have the mode it returns recorded as a confirmed model. Unknown
+  and vendor-prefixed categories still reach the fallback, because the protocol reserves those for custom use
+  and an agent may legitimately put one on its genuine model selector.
+
+- **Log records from libraries no longer bypass the non-blocking stderr writer.** The ACP SDK defines no
+  logger of its own and reports handler failures through the root logger, which it did not do before 0.12.
+  Python installs a plain synchronous stderr handler on the root logger the first time anything logs through
+  it without one configured, and leaves it there for the life of the process — so the first such record would
+  wire every later traceback, from any library, to a synchronous write on the event loop thread. That is
+  exactly the stall the background writer exists to prevent for this project's own records. Logging setup now
+  owns a handler on the root logger, which both routes those records through the queue and pre-empts that
+  installation outright; silencing logs installs a null handler there for the same reason.
+
+  Foreign root handlers are left alone and the root level is untouched, so raising this server's verbosity
+  does not drag every dependency's debug traffic onto the wire. Records that did not originate here are
+  wrapped as a `foreign_log` event with the traceback escaped into a single field, because this stream is one
+  JSON object per line by contract and a raw traceback would make a log shipper treat the incident as
+  malformed input and discard it.
+
+- **A sandboxed write that fails on disk now returns a clean protocol error.** Writing a file let an `OSError`
+  escape unwrapped, where every other client callback already converts one into a protocol error. Under 0.12
+  that difference began to matter: the SDK re-raises a protocol error without logging but formats anything
+  else as a traceback, and an `OSError` message carries the filename it failed on — the resolved absolute
+  sandbox path, not the relative one the agent asked for. The write now fails the way a read already did, and
+  the path stays out of the log. A failed write is still not journalled as a denial, which is reserved for the
+  policy refusing.
+
+- **An unreadable `RUTHERFORD_DEPTH` is now fatal instead of being read as top level.** `current_depth()`
+  turned a malformed or negative value into `0`, and a unit test asserted that as correct. Depth `0` is the
+  only depth permitted to request `direct_workspace_mutation`, so the failure mode of a garbled environment
+  was to grant the one privilege the depth check exists to withhold. A value that is present but unusable now
+  raises `INVALID_INPUT` naming the variable. Absent still means top level, because absent and "a genuine
+  top-level start" are the same observation and cannot be told apart.
+
+  Upgrading, a process that sets `RUTHERFORD_DEPTH` to a non-integer or negative value will now fail its
+  delegation instead of silently running as top level. Unset the variable for a genuine top-level run.
+
+- **The delegation depth cap now applies across process boundaries, which changes behaviour.** Rutherford
+  writes `RUTHERFORD_DEPTH` into every agent it spawns, but nothing read it back — `current_depth()` had no
+  callers — so depth restarted at zero in each process and `max_depth` only ever counted within one. A chain
+  of nested Rutherfords (an agent that is itself running one of these servers) could recurse without limit.
+  Every tool that spawns an agent now seeds its depth from the environment.
+
+  Upgrading, a nesting chain deeper than `max_depth` (default `3`) that previously ran will now be refused
+  with `MAX_DEPTH_EXCEEDED`. That is the cap doing what it always said it did; raise `max_depth` if the depth
+  was intended.
+
+- **Subprocess deadlock from the inherited MCP stdio pipe** — `npm install`, the sandbox `git` calls,
+  and workspace fingerprinting now pass `stdin=subprocess.DEVNULL`, so a helper child never inherits
+  the live MCP transport. This fixes observed Windows hangs where the child froze at 0% CPU and did not
+  respond to `kill()`, clearing only when the server exited. Contributed by
+  [@Artemonim](https://github.com/Artemonim) in [#22].
+- **MCP host deadlock during ACP teardown** — session `close` / `cancel` are bounded and shielded, so
+  cancelling the waiter no longer abandons teardown. Descendants are snapshotted before the adapter is
+  killed, because they reparent away once it exits and are then invisible. Teardown runs snapshot, kill
+  the adapter, kill brokered terminals, reap descendants, close transport — closing first left inherited
+  stdio handles held by live descendants while the SDK waited on EOF. Contributed by
+  [@Artemonim](https://github.com/Artemonim) in [#23].
+- **Teardown deadlines bound how long a stage is waited on, not whether it happens.** An unbounded
+  pre-kill snapshot never returns, so the body never reaches its kill and the `finally` never runs —
+  stranding the very process teardown exists to collect. That applied to the session adapter and to
+  brokered terminals; a terminal is a child of the server rather than the adapter, so the session's reap
+  walks a different tree and would never have collected it.
+
+  Where a stage has work that cannot simply be redone, the deadline now stops the waiting and leaves the
+  work running. Cancelling it instead looks equivalent but is not. A `to_thread` still queued on a busy
+  executor has not started, so cancelling it succeeds and the reap never runs at all, discarding a tree
+  that was already captured — and executor pressure is the exact condition these deadlines exist for.
+  Closing the transport is the same class for a different reason: the ACP SDK marks the connection closed
+  *before* awaiting its dispatcher stop, sender close, and task shutdown, so a cancel part-way through
+  strands the rest forever, since every later close returns immediately against the flag already set.
+  Only a genuinely repeatable wait is still cancelled — a `session/cancel` reply, whose payload is handed
+  to the sender's queue fully serialized, so giving up on it cannot truncate a write.
+
+  The session and terminal paths share one implementation of this, including a single owner for work
+  that outran its caller. Previously each kept its own, and the session's stopped backing tasks past a
+  fixed count — so a busy teardown could drop exactly the work its deadline had promised to let finish.
+  A snapshot that lands after its deadline is reaped rather than dropped, and a timeout, a failure, an
+  undispatched reap, or a backlog of cleanups that are not completing is logged rather than passing for
+  an empty tree.
+- **Agent stderr is detached from the host pipe, and structured logs go through a non-blocking writer.**
+  The writer's queue is bounded; when a wedged sink causes it to overflow, the dropped count is reported
+  as a `log_records_dropped` record rather than vanishing — the gap is visible in the same JSON stream,
+  anchored before the next record.
+
+[#21]: https://github.com/chapmanjw/rutherford-mcp-server/pull/21
+[#22]: https://github.com/chapmanjw/rutherford-mcp-server/pull/22
+[#23]: https://github.com/chapmanjw/rutherford-mcp-server/pull/23
 
 ## [3.1.0] - 2026-07-26
 

@@ -202,7 +202,7 @@ def _sanitize_message(message: str | None) -> str | None:
     return None
 
 
-def _sanitize_fields(fields: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_fields(fields: dict[str, Any]) -> dict[str, Any]:  # noqa: C901 - nested allowlist of every safe log field
     """Defensive allowlist pass before :func:`log_event` -- primary and nested."""
     sanitized: dict[str, Any] = {}
     for key, value in fields.items():

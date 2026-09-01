@@ -261,7 +261,7 @@ def extract_summary(output: str, *, fallback: str) -> str:
     return fallback
 
 
-def stage_input_files(stage: str, root: Path) -> list[Path]:
+def stage_input_files(stage: str, root: Path) -> list[Path]:  # noqa: C901 - one matcher per CI stage family
     """Resolve the files that should influence the stage cache."""
 
     files = list_repo_files(root)
@@ -1057,7 +1057,7 @@ def collect_deep_project_imports(path: Path) -> list[dict[str, Any]]:
     return findings
 
 
-def stage_line_limits(
+def stage_line_limits(  # noqa: C901, PLR0915 - executable-LOC walk with folder fan-out and per-file findings
     root: Path,
     cache_dir: Path,
     log_dir: Path,

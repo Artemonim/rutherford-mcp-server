@@ -34,7 +34,12 @@ _TIGHT_PRE_PROMPT_S = 1.0
 
 def _git(path: Path, *args: str) -> None:
     """Run a git command in ``path`` (sync helper so async tests avoid ASYNC221)."""
-    subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    subprocess.run(  # noqa: S603 - fixed `git` argv0 plus internal test subcommands, no shell
+        ["git", *args],  # noqa: S607 - `git` from PATH is deliberate in tests
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _git_repo(path: Path) -> None:

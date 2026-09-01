@@ -138,7 +138,16 @@ async def test_failed_run_is_persisted_with_failed_status(tmp_path: Path) -> Non
 
 
 def _git(path: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=path, capture_output=True, text=True, check=True).stdout
+    # S603/S607: a literal `git` argv0 resolved from PATH, building a fixture repo. Kept live rather than
+    # ignored repo-wide because `just check` runs this suite on a contributor's machine.
+    completed = subprocess.run(  # noqa: S603
+        ["git", *args],  # noqa: S607 - `git` resolved from PATH
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
 
 
 def _git_repo(path: Path) -> None:
@@ -436,3 +445,50 @@ def test_render_panel_voice_files_layout() -> None:
     assert "_session: sess-9_" in artifacts["voices/voice-3.md"]
     assert "voices/skipped.md" in artifacts
     assert "kimi: not installed" in artifacts["voices/skipped.md"]
+
+
+async def test_a_direct_mutation_run_records_that_it_had_no_sandbox(tmp_path: Path) -> None:
+    """The durable half of the audit trail for a run that captures no diff.
+
+    An unsandboxed write leaves ``changed_files`` empty for the same reason it leaves no diff: nothing
+    watched the tree. Without a flag on the record, that is indistinguishable from a run that wrote nothing,
+    and the log line that would have said otherwise is silenced by ``log_format = "off"``.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    config = RutherfordConfig(allow_direct_workspace_mutation=True, trusted_workspaces=[str(work)])
+    result = await _delegation(tmp_path, config=config).delegate(
+        DelegationRequest(
+            target=Target(cli="fake"),
+            prompt="what is 17 + 25?",
+            working_dir=str(work),
+            safety_mode=SafetyMode.WRITE,
+            direct_workspace_mutation=True,
+            persist=True,
+        ),
+    )
+    assert result.ok and result.direct_mutation is True
+    assert result.run_dir is not None
+    record = read_record(Path(result.run_dir))
+    assert record.direct_mutation is True, "the persisted record must say this run had no sandbox"
+    assert record.changed_files == []  # nothing captured it -- which is exactly why the flag has to be there
+    assert record.safety_mode is SafetyMode.WRITE
+
+
+async def test_an_ordinary_sandboxed_run_is_not_marked_as_direct(tmp_path: Path) -> None:
+    """The flag has to distinguish, so the common path must leave it unset rather than False-ish by accident."""
+    work = tmp_path / "work"
+    work.mkdir()
+    config = RutherfordConfig(trusted_workspaces=[str(work)])
+    result = await _delegation(tmp_path, config=config).delegate(
+        DelegationRequest(
+            target=Target(cli="fake"),
+            prompt="what is 17 + 25?",
+            working_dir=str(work),
+            safety_mode=SafetyMode.WRITE,
+            persist=True,
+        ),
+    )
+    assert result.ok and result.direct_mutation is None
+    assert result.run_dir is not None
+    assert read_record(Path(result.run_dir)).direct_mutation is None

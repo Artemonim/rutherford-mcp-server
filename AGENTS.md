@@ -1,34 +1,101 @@
-# AGENTS
+# AGENTS.md
 
-## Doctrine
+Guidance for coding agents working in this repository, and the canonical home for it. Written to
+[the AGENTS.md convention](https://agents.md) so any agent finds the same contract rather than each
+one needing a file named after its vendor.
 
-- This is an **Artemonim fork** of upstream [chapmanjw/rutherford-mcp-server](https://github.com/chapmanjw/rutherford-mcp-server) (MIT). Work on `dev`; `main` tracks upstream.
-- Rutherford is a stdio MCP server that orchestrates other coding agents over the [Agent Client Protocol (ACP)](https://agentclientprotocol.com). It is the ACP *client*; each coding agent is an ACP *agent* (spawned over stdio). It never calls a model provider API directly and never scrapes agent stdout — the protocol delivers the answer, usage, tool activity, and permissions.
-- Adding an agent is config (`[agents.<id>]`) or a built-in `AgentDescriptor`, never a code adapter. See `docs/adding-an-agent.md`.
-- Default `SafetyMode` is `read_only`; `write` / `yolo` are explicit opt-in behind a trusted-workspace check.
+`CLAUDE.md` still exists, because Claude Code reads that name and not this one; it imports this file
+and holds nothing of its own. Anything that belongs to every agent belongs here.
+
+This is an **Artemonim fork** of upstream [chapmanjw/rutherford-mcp-server](https://github.com/chapmanjw/rutherford-mcp-server) (MIT). Work on `dev`; `main` tracks upstream.
+
+Humans want [CONTRIBUTING.md](CONTRIBUTING.md), which covers the same ground at more length and adds
+the review and pull-request expectations.
+
+## Commands
+
+```sh
+uv sync                       # install deps (project + dev group) into .venv
+uv run ruff check .           # lint
+uv run ruff format .          # format (write)
+uv run ruff format --check .  # format check (CI mode)
+uv run mypy                   # type-check (strict)
+uv run python scripts/check_license_headers.py   # license-header check
+uv run pytest                 # unit tests only (integration deselected by default)
+uv run pytest -m integration  # local-only suite that drives real ACP agents
+```
+
+A `justfile` wraps these. `just check` is the upstream pre-push gate: it runs `scripts/gate.py`, which executes
+every stage in order (lint, format-check, license-check, typecheck, tests, the per-file coverage floor,
+the entrypoint smoke check, and the build), streams their output, and stops at the first failure.
+`just test-integration` drives the real agents. Run a single test file with
+`uv run pytest tests/acp/test_session.py`.
+
+**If you are an agent, read the verdict rather than the prose.** The gate writes
+`.tmp/gate-report.toon`, which names the stage that failed instead of leaving you to parse output meant
+for a human:
+
+```
+schema: 1
+head: <sha>
+dirty: false          # true means uncommitted edits were in the tree, so `head` alone does not describe what ran
+verdict: pass         # or fail
+failed_stage: null    # the stage name when verdict is fail
+stages[8,]{name,ok,seconds,exit_code}:
+  lint,true,0.08,0
+  ...
+```
+
+`scripts/gate.py` holds the only local definition of that gate, and `tests/test_gate.py` asserts its stages
+match the CI workflow's, so the two cannot drift. The report is gitignored: it describes one run on one
+machine and is worthless committed.
+
+This fork's full Agent Enforcer 2 local CI is `./run.ps1` (see [docs/ci.md](docs/ci.md)). Prefer
+`./run.ps1 -SkipLaunch` as the end-of-work quality gate on Windows; `just check` remains valid and is
+what GitHub Actions exercises.
+
+Recommended pre-push flow: `just check` (or `./run.ps1 -SkipLaunch`), then `just test-integration` for
+whatever agents the machine has installed and authenticated.
+
+There is an optional pre-push hook that refuses a push whose commits have no fresh, passing report from a
+clean tree. It reads the report rather than running the gate, so it costs milliseconds. Enable it once per
+clone; it is off until you do, because hooks are not version-controlled:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+It is a reminder, not a boundary -- `git push --no-verify` skips it.
+
+This fork also has a pre-commit guard (`scripts/pre_commit_ci_guard.py` via `.githooks/pre-commit`) that
+blocks a local commit unless the current HEAD has a fresh successful `.ci_cache/report.json`. For Cursor
+Agents: `block_until_ms=600000` or higher. If the terminal times out, decide whether to wait ~5 more
+minutes or kill the job.
 
 ## Quality Gate
 
-- Primary command: `./run.ps1 -SkipLaunch` (full AE2 run without smoke).
-- Intermediate agent check: `.venv/Scripts/Activate.ps1 && ./run.ps1 -Fast -SkipLaunch` (or just `./run.ps1 -Fast -SkipLaunch` — stages use `uv run`).
+- Primary command on this fork: `./run.ps1 -SkipLaunch` (full AE2 run without smoke).
+- Intermediate agent check: `./run.ps1 -Fast -SkipLaunch`.
 - **Run the quality gate at the end of any work.** Use other tools only when the runner is insufficient.
-- Local commits are blocked by the pre-commit guard (`scripts/pre_commit_ci_guard.py` via `.githooks/pre-commit`) unless the current HEAD has a fresh successful `.ci_cache/report.json`.
-- For Cursor Agents: `block_until_ms=600000` or higher. If the terminal times out, decide whether to wait ~5 more minutes or kill the job.
 
 ### Toolchain
 
 Details: [`docs/ci.md`](docs/ci.md).
 
 - **uv** — install deps (`uv sync`) and all Python CI tools (`uv run …`).
-- **ruff** — `format` + `check` (blocking), including flake8-bandit (`S`). `S101`/`S311` are disabled; under `tests/**` the whole `S` set is ignored. Suppress with `# noqa: S… (reason)`.
+- **ruff** — `format` + `check` (blocking), including flake8-bandit (`S`), mccabe (`C901`), and statement
+  count (`PLR0915`). `S101`/`S311` are disabled globally; under `tests/**` only `S101` is ignored — other
+  security rules stay live in tests. Suppress with `# noqa: S… (reason)`.
 - **mypy** + **compileall** — `compile` stage (strict).
-- **pytest** + **pytest-cov** + **pytest-xdist** — unit suite (`-n logical`); integration deselected by default (`-m 'not integration'`). Aggregate floor **90%**; after coverage, `scripts/check_per_file_coverage.py` (**80%** per-file). Do not weaken. Use `-n0` for serial debugging.
+- **pytest** + **pytest-cov** + **pytest-xdist** — unit suite (`-n logical`); integration deselected by
+  default (`-m 'not integration'`). Aggregate floor **90%**; after coverage, `scripts/check_per_file_coverage.py`
+  (**80%** per-file). Do not weaken. Use `-n0` for serial debugging.
 - **license headers** — `scripts/check_license_headers.py` (two-line SPDX).
 - **pip-audit** — `security` stage (dependency CVEs; source-level security lives in `lint`).
 - **PSScriptAnalyzer** — PowerShell `self-check`.
 - **codebase-memory-mcp** — warn-only `index_repository` (`mode=full`, `persistence=false`).
 
-! Do not use standalone `bandit`; `# nosec` is ignored by ruff — use `# noqa: S…` only.
+Do not use standalone `bandit`; `# nosec` is ignored by ruff — use `# noqa: S…` only.
 
 ## Glossary
 
@@ -43,37 +110,86 @@ Details: [`docs/ci.md`](docs/ci.md).
 
 ## Architecture
 
-Layers (dependencies point inward toward domain):
+Rutherford is a stdio MCP server that orchestrates other agentic coding agents over the
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com). It is the ACP *client*; each coding
+agent is an ACP *agent* that Rutherford spawns as a server over stdio and drives through a real
+`initialize` / `new_session` / `prompt` exchange. It never calls a model provider's API directly and
+never reimplements an agent's features — under ACP the protocol negotiates output, system prompts,
+file context, permissions, and resume, so there is no per-agent output parser to maintain.
+
+This is a complete rewrite of the v2 design. There is no `ProcessRunner`, no `adapters/` package, no
+`build_invocation` / `parse_output`, and no hand-written code adapter per CLI. Adding an agent is now
+config-driven.
+
+Layered, with dependencies pointing inward toward the domain:
 
 ```
-MCP tool layer (FastMCP)   src/rutherford/server.py + tools/   thin wrappers
+MCP tool layer (FastMCP)   src/rutherford/server.py + tools/   thin wrappers, no business logic
         |
 services (orchestration)   services/   delegation, consensus, debate, jobs, roles
         |
 ACP runtime                acp/   session, journal, permission, descriptors, roster, conformance
         |
-domain + config            domain/, config/, io/   models, enums, errors, config
+domain + config            domain/, config/, io/   models, enums, errors, error codes, config
 ```
 
-### Key seams
+### The key seams
 
-- **`AgentDescriptor` / `DescriptorRegistry` (`acp/descriptors.py`)** — id, display name, launch `command`, optional `provider`, `default_model`, handshake budget, env. `HIGH_FIDELITY` is the built-in roster.
-- **`ACPSession` / `run_acp_turn` (`acp/session.py`)** — spawn, handshake, multi-turn `session/prompt` on one live session (debate: one session per voice). Journal → `DelegationResult`.
-- **`EventJournal` (`acp/journal.py`)** — event-sourced turn record; answer/usage/tools are derived, never scraped from stdout.
-- **`PermissionPolicy` (`acp/permission.py`)** — SafetyMode → ACP permission / fs / terminal decisions.
-- **Roster (`acp/roster.py`)** — `build_registry(config)`: built-ins → auto-detected local models → config overrides → `enabled_agents` filter.
+- **`AgentDescriptor` / `DescriptorRegistry` (`acp/descriptors.py`)** — a descriptor is the small
+  declaration that replaces a subprocess adapter: an id, a display name, the launch `command` (the
+  argv that starts the agent as an ACP server), an optional fixed `provider`, a `default_model`, a
+  handshake budget, and env overrides. `HIGH_FIDELITY` is the built-in roster. The registry
+  is a closed, fail-fast id → descriptor mapping.
+
+- **`ACPSession` / `run_acp_turn` (`acp/session.py`)** — the reusable connection primitive. An
+  `ACPSession` spawns the agent, performs the handshake, and runs any number of `session/prompt`
+  turns on the *same* live session (the foundation for a debate: one session per voice across all
+  rounds, sending only the delta each round). Each turn reduces its event journal into a normalized
+  `DelegationResult` and classifies the failure's re-execution safety. `run_acp_turn` is the one-shot
+  open-prompt-close wrapper used by `delegate` and `consensus`.
+
+- **`EventJournal` (`acp/journal.py`)** — the event-sourced record of one turn. A synchronous stream
+  observer appends each incoming `session/update` (and the client's own permission / fs decisions) in
+  receive order, so the journal is complete the moment the prompt response resolves. The answer text,
+  token usage, tool activity, and side-effect signal are all *derived* from the journal, never scraped
+  from stdout.
+
+- **`PermissionPolicy` (`acp/permission.py`)** — the safety mode rendered as ACP permission /
+  filesystem / terminal decisions. Rutherford is the permission authority at each tool call: a
+  non-mutating mode serves reads but denies writes, terminal execution, and tool-permission requests;
+  a mutating mode allows them. It selects the one-shot allow/reject permission option the agent offers.
+
+- **The config-driven roster (`acp/roster.py`)** — `build_registry(config)` assembles the live
+  registry: the built-in descriptors, then any auto-detected local-model agents (lowest precedence),
+  then config overrides / additions, then the `enabled_agents` filter. An `[agents.<id>]` entry
+  overrides a built-in, defines a new agent, or clones a built-in with `base` to point it at a local
+  runtime via `backend`.
+
+### Layering rules
+
+- The FastMCP layer is thin: a tool validates input, calls a service, and returns the normalized
+  envelope via `tool_success` / `tool_error`. No orchestration logic lives there. `server.py` declares
+  the `@mcp.tool` surface; each `tools/<name>.py` is the validating wrapper.
+- The services depend on the descriptor registry and the ACP runtime, never on a concrete agent. The
+  whole core is testable with the fake ACP agent in `tests/fake_acp_agent.py` and no real subprocess.
+- Adding an agent is config (`[agents.<id>]`) or a new built-in `AgentDescriptor` — never a code
+  adapter. See [docs/adding-an-agent.md](docs/adding-an-agent.md).
+- Default `SafetyMode` is `read_only`; `write` and `yolo` are explicit opt-in behind a
+  trusted-workspace check.
 
 ### Conventions
 
-- Python 3.11+, mypy strict, ruff (120-char lines), SPDX header on every source file.
-- Docstrings on the public API of acp / services / domain.
-- Tool payloads: TOON via `io/serialize.py`.
-- No emojis in source unless a user-visible string clearly benefits.
+- Python 3.11+, fully type-annotated, mypy strict. Ruff for lint and format (120-char lines).
+- A two-line SPDX license header on every source file (enforced by
+  `scripts/check_license_headers.py`).
+- Docstrings on the public API of the core layers (acp, services, domain).
+- Tool payloads are serialized as TOON behind the `io/serialize.py` seam (`python-toon`).
+- No emojis in source files unless a user-visible string clearly benefits.
 
 ## Known issues
 
 - **Cursor ACP model routing:** Cursor inference follows the launch `--model` flag (`model_launch_flag` on the descriptor), not in-session `set_config_option` / `set_model` (those can echo `currentValue` without changing runtime). Envelope `provenance.confirmed` stays false for launch selection — ACP does not attest the runtime model. `provenance.model` is still the effective model that ran (for F3 lineage / correlation discount); only `confirmed` attests an in-session ACP selection. Launch advertisement checks are advisory for launch-flag agents (missing ACP ads must not block argv routing on 0.11). Launch advertisement validation accepts compound ids that differ only in a boolean `fast=` value (exact `--model` argv is preserved). Live Cursor/entitlement may still write a `*-fast` runtime slug in `store.db`; family routing is the reliable check, not a non-fast runtime assertion.
-- **ACP SDK model channels:** `agent-client-protocol` 0.10.x exposes unstable `session.models` + `set_session_model`; 0.11+ removes both and keeps stable `config_options`. Rutherford treats the legacy channel as optional (`getattr` / capability-gated `set_session_model`) so a config-only SDK does not INTERNAL on open. An explicit or effort-rewritten in-session model that cannot be confirmed is `MODEL_UNAVAILABLE` — never a silent wrong default. Pin is `>=0.11,<0.12` after channel-2 / launch-flag routing covers selection.
+- **ACP SDK model channels:** `agent-client-protocol` 0.10.x exposes unstable `session.models` + `set_session_model`; 0.11+ removes both and keeps stable `config_options`. Rutherford treats the legacy channel as optional (`getattr` / capability-gated `set_session_model`) so a config-only SDK does not INTERNAL on open. An explicit or effort-rewritten in-session model that cannot be confirmed is `MODEL_UNAVAILABLE` — never a silent wrong default. The published pin is `agent-client-protocol==0.12.0`: 0.12 salvages unparseable fields instead of rejecting them, so agent-controlled response fields are read through defensive helpers, never off their annotations.
 
 ## Documentation Map
 
@@ -83,6 +199,7 @@ Project docs are root `*.md` and `docs/`. When you add a file under `docs/` or a
 
 - `README.md` — human runbook / upstream overview.
 - `AGENTS.md` — operational contract for agents (this file).
+- `CLAUDE.md` — Claude Code import stub pointing at this file.
 - `CHANGELOG.md` — release history.
 - `CONTRIBUTING.md` — contribution / upstream conventions.
 - `SECURITY.md` — security policy.
@@ -110,6 +227,7 @@ Project docs are root `*.md` and `docs/`. When you add a file under `docs/` or a
 - `scripts/check_license_headers.py` — SPDX header gate.
 - `scripts/check_per_file_coverage.py` — per-file coverage floor (80%).
 - `scripts/pre_commit_ci_guard.py` — freshness guard for `.ci_cache/report.json`.
+- `scripts/gate.py` — upstream `just check` runner and machine-readable verdict.
 
 ## Code Map
 
@@ -125,7 +243,6 @@ Project docs are root `*.md` and `docs/`. When you add a file under `docs/` or a
 - `src/rutherford/tools/` — thin MCP tool wrappers (validate → service → envelope).
 - `src/rutherford/domain/` — models, enums, errors, error codes.
 - `src/rutherford/config/` — config loading / agent overrides / global trust allowlist CLI helpers.
-
 - `src/rutherford/io/` — serialization (TOON) and I/O seams.
 - `src/rutherford/runtime/` — process/runtime helpers.
 - `src/rutherford/roles/` — built-in role personas (`.md` package data).
@@ -137,6 +254,7 @@ Do not commit or treat as source of truth:
 
 - `.ci_cache/` — local CI reports and logs
 - `.enforcer/` — Enforcer logs
+- `.tmp/` — gate report and other local scratch
 - `.venv/` — uv-managed virtualenv
 - `.codebase-memory/` — derived MCP navigation cache (CI uses `persistence=false` and usually does not write an artifact)
 

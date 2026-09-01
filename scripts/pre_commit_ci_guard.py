@@ -123,19 +123,9 @@ def load_ci_report(report_path: Path) -> CiReportState:
         passed=passed if isinstance(passed, bool) else None,
         overall_status=payload.get("status") if isinstance(payload.get("status"), str) else None,
         profile=ci_section.get("profile") if isinstance(ci_section.get("profile"), str) else None,
-        finished_at_utc=(
-            payload.get("finished_at_utc")
-            if isinstance(payload.get("finished_at_utc"), str)
-            else None
-        ),
-        head_state=git_section.get("head_state")
-        if isinstance(git_section.get("head_state"), str)
-        else None,
-        head_commit=(
-            git_section.get("head_commit")
-            if isinstance(git_section.get("head_commit"), str)
-            else None
-        ),
+        finished_at_utc=(payload.get("finished_at_utc") if isinstance(payload.get("finished_at_utc"), str) else None),
+        head_state=git_section.get("head_state") if isinstance(git_section.get("head_state"), str) else None,
+        head_commit=(git_section.get("head_commit") if isinstance(git_section.get("head_commit"), str) else None),
     )
 
 

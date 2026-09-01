@@ -19,6 +19,14 @@ jobs:
   verify:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    # A bound on a HUNG job, not a performance target. The default is six hours, so one wedged run burns
+    # that on every matrix cell before GitHub reclaims it -- and shows a spinner the whole time, which reads
+    # as "still working" rather than "already dead". This project has form here: tests/conftest.py documents
+    # a Windows ProactorEventLoop teardown that hangs forever on 3.11/3.12, and the subprocess deadlock in
+    # the stdin-inheritance fix was the same shape. The slowest cell is around five minutes, so this is
+    # roughly five times headroom: late enough never to fire on a slow runner, early enough that a hang
+    # costs minutes.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -31,16 +39,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
+      # --locked fails on a stale lockfile instead of silently re-resolving. Several pinned versions sit
+      # exactly on their first patched release with no headroom, so a downward resolve would reopen a
+      # closed advisory while the build stayed green.
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # The unit test step (with the coverage floor in pyproject addopts) is a required
       # gate: a failing test or coverage below the floor fails the build, with no override.

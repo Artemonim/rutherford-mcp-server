@@ -39,7 +39,7 @@ Approximate order: `self-check → line-endings → agents-coverage → fmt → 
 | `line-endings` | implement | Repo policy is LF (`.gitattributes`); stage normalizes text to LF (`--eol-fix`). |
 | `agents-coverage` | implement (warn-only) | `AGENTS.md` must cover `docs/` and `scripts/` (file or ancestor directory). Missing `AGENTS.md` → `fail`. |
 | `fmt` | implement | `uv run ruff format` on `src/` and `tests/` (autofix by default). |
-| `lint` | implement | `uv run ruff check` with `S` (flake8-bandit). `S101`/`S311` disabled; under `tests/**` all `S` ignored. |
+| `lint` | implement | `uv run ruff check` with `S` (flake8-bandit), `C901`, `PLR0915`. `S101`/`S311` disabled globally; under `tests/**` only `S101` is ignored. |
 | `line-limits` | implement | Executable LOC for `src/**/*.py`, `tests/**/*.py`, and root `*.ps1`; excludes `build.py`/`build.ps1`. Folder fan-out: warn≥35, fail≥70. |
 | `license-check` | implement | Rutherford-specific: `uv run python scripts/check_license_headers.py`. |
 | `compile` | implement | `compileall` + `uv run mypy` (strict). |

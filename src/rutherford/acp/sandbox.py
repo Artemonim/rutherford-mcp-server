@@ -129,7 +129,7 @@ class Sandbox:
 
     @property
     def is_git(self) -> bool:
-        """Whether this sandbox is a git worktree (``True``) or a temp-tree copy (``False``)."""
+        """Whether this sandbox is a git worktree (otherwise a temp copy of a non-git tree)."""
         return self._is_git
 
     def finish(self, mode: SafetyMode) -> SandboxResult:
@@ -465,7 +465,7 @@ class SandboxManager:
         prefix = ["-c", "core.autocrlf=false"] if force_no_autocrlf else []
         cmd = ["git", *prefix, "-C", str(cwd), *args]
         try:
-            completed = subprocess.run(  # noqa: S603
+            completed = subprocess.run(  # noqa: S603 - fixed `git` argv0 plus internal subcommands, no shell
                 cmd,
                 capture_output=True,
                 text=True,

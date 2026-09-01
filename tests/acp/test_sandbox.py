@@ -35,7 +35,16 @@ def _service(config: RutherfordConfig | None = None) -> DelegationService:
 
 def _git(path: Path, *args: str) -> str:
     """Run a git command in ``path`` (a sync helper, so async tests do not trip the blocking-call lint)."""
-    return subprocess.run(["git", *args], cwd=path, capture_output=True, text=True, check=True).stdout
+    # S603/S607: a literal `git` argv0 resolved from PATH, building a fixture repo. Kept live rather than
+    # ignored repo-wide because `just check` runs this suite on a contributor's machine.
+    completed = subprocess.run(  # noqa: S603
+        ["git", *args],  # noqa: S607 - `git` resolved from PATH
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
 
 
 def _git_repo(path: Path) -> None:
@@ -303,12 +312,24 @@ def test_sandbox_worktree_is_created_and_cleaned_up(tmp_path: Path) -> None:
         return any(form in stdout or form in stdout.replace("/", "\\") for form in root_forms)
 
     # git knows about the worktree while it is live.
-    listed = subprocess.run(["git", "worktree", "list"], cwd=tmp_path, capture_output=True, text=True, check=True)
+    listed = subprocess.run(
+        ["git", "worktree", "list"],  # noqa: S607 - `git` resolved from PATH
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     assert _listed(listed.stdout), f"git worktree list did not show the sandbox worktree {root}:\n{listed.stdout}"
     sandbox.cleanup()
     assert not root.exists(), "the worktree dir survived cleanup"
     # The repo no longer lists the removed worktree.
-    after = subprocess.run(["git", "worktree", "list"], cwd=tmp_path, capture_output=True, text=True, check=True)
+    after = subprocess.run(
+        ["git", "worktree", "list"],  # noqa: S607 - `git` resolved from PATH
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     assert not _listed(after.stdout), "git still lists the removed worktree"
 
 
@@ -439,7 +460,7 @@ def test_non_git_copy_diff_lists_created_and_edited(tmp_path: Path) -> None:
 
 def test_git_repo_with_no_commit_falls_back_to_copy(tmp_path: Path) -> None:
     """A git repo with no commit yet (no HEAD) cannot host a worktree, so the copy strategy is used."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)  # noqa: S607 - literal git argv
     (tmp_path / "wip.txt").write_text("work in progress\n", encoding="utf-8")
     manager = SandboxManager()
     sandbox = manager.open(str(tmp_path))
@@ -881,3 +902,62 @@ def test_copy_tree_does_not_leak_a_temp_dir_on_a_build_failure(tmp_path: Path, m
     assert created, "expected the sandbox build to create a temp dir before failing"
     leaked = [path for path in created if path.exists()]
     assert not leaked, f"a temp sandbox dir leaked on a build failure: {leaked}"
+
+
+async def test_a_failed_write_is_a_protocol_error_not_a_bare_oserror(tmp_path: Path) -> None:
+    """A write that fails on disk must surface as RequestError, so no absolute sandbox path reaches a log.
+
+    From ACP SDK 0.12, the SDK's request dispatch calls ``logging.exception`` on anything that is not a
+    ``RequestError`` (0.11 converted it to a JSON-RPC internal error and logged nothing), and it logs through
+    the root logger. An ``OSError`` escaping here would therefore be formatted as a traceback whose message
+    carries the CONFINED path -- resolved and absolute, not the relative path the agent asked for -- and
+    written synchronously from the event loop thread. ``RequestError`` is caught first by the SDK and
+    re-raised without logging, so the wrap is what keeps both properties.
+
+    The failure is provoked without any permission games: a path component that already exists as a regular
+    file makes ``mkdir(parents=True, exist_ok=True)`` re-raise, identically on Windows and POSIX.
+    """
+    from acp import RequestError
+    from rutherford.acp.client import RutherfordACPClient
+    from rutherford.acp.journal import EventJournal
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "blocker").write_text("a regular file where a directory would have to go", encoding="utf-8")
+    journal = EventJournal()
+    client = RutherfordACPClient(
+        journal=journal,
+        policy=PermissionPolicy(SafetyMode.WRITE, sandboxed=True),
+        cwd=str(root),
+        sandbox_root=str(root),
+    )
+
+    with pytest.raises(RequestError) as excinfo:
+        await client.write_text_file(session_id="s", path="blocker/child.txt", content="never lands")
+
+    assert "could not write blocker/child.txt" in str(excinfo.value)
+    # The resolved sandbox root must not appear in what the SDK would have turned into a logged traceback.
+    assert str(root) not in str(excinfo.value.data or "")
+    # A failed write is not a refusal: fs_write_denied stays reserved for the policy declining.
+    assert journal.kinds() == []
+
+
+async def test_a_successful_sandboxed_write_still_journals_fs_write(tmp_path: Path) -> None:
+    """The OSError wrap must not disturb the happy path: the file lands and the journal records one write."""
+    from rutherford.acp.client import RutherfordACPClient
+    from rutherford.acp.journal import EventJournal
+
+    root = tmp_path / "root"
+    root.mkdir()
+    journal = EventJournal()
+    client = RutherfordACPClient(
+        journal=journal,
+        policy=PermissionPolicy(SafetyMode.WRITE, sandboxed=True),
+        cwd=str(root),
+        sandbox_root=str(root),
+    )
+
+    await client.write_text_file(session_id="s", path="sub/dir/ok.txt", content="hello")
+
+    assert (root / "sub" / "dir" / "ok.txt").read_text(encoding="utf-8") == "hello"
+    assert journal.kinds() == ["fs_write"]

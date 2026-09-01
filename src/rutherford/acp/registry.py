@@ -93,8 +93,15 @@ def fetch_registry(
         _log.warning("ACP registry fetch failed (%s); falling back to cache", exc)
     from_network = raw is not None
     if raw is None and cache_path is not None and cache_path.exists():
-        raw = cache_path.read_bytes()
-        source = "cache"
+        try:
+            raw = cache_path.read_bytes()
+            source = "cache"
+        except OSError as exc:
+            # * An unreadable cache is a cache MISS, not a crash. Without this the OSError escapes
+            # `discover`, which catches only RegistryError, and the user gets a raw traceback instead of
+            # the clean "check the network or set RUTHERFORD_ACP_REGISTRY_URL" message below. Reachable
+            # via a permissions change, a directory in the cache's place, or a delete racing exists().
+            _log.warning("ACP registry cache at %s could not be read (%s); treating it as absent", cache_path, exc)
     if raw is None:
         raise RegistryError(
             f"could not fetch the ACP registry from {url} and no cache is available; check the network "
@@ -220,8 +227,11 @@ def _str_tuple(value: object) -> tuple[str, ...]:
 
 def _fetch_url(url: str, timeout_s: float) -> bytes:
     """GET ``url`` with a real User-Agent and return the body bytes (raises on failure)."""
-    request = Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
+    # S310: the registry URL comes from config, and `file:` is SUPPORTED on purpose -- the tests point this
+    # at a local fixture rather than the network. A caller cannot set it; an operator naming a local file in
+    # their own config is reading their own disk.
+    request = Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 - config-supplied; file: is intended
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - same URL, see above
         body: bytes = response.read()
     return body
 
