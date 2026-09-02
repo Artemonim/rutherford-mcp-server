@@ -179,10 +179,12 @@ async def delegate(
     be explicit and on the configured `trusted_workspaces` allowlist (`trust_workspace=true` does NOT
     qualify), and it is refused inside a delegation chain. propose cannot use it at all (`INVALID_INPUT`).
     `files` lists paths to put in scope. `role` names a persona (see
-    `list_roles`) whose system prompt is prepended to `prompt`. `effort` (low | medium | high | xhigh) asks
-    the agent to spend more reasoning where it has a knob (codex/cursor via the model id, cline via
-    --thinking, junie via env); a reported no-op for an agent with none. Omitted, the configured
-    `default_effort` (per-agent or global) applies. `fallback` is an ordered list of alternate targets
+    `list_roles`) whose system prompt is prepended to `prompt`. `effort` (low | medium | high | xhigh | max)
+    asks the agent to spend more reasoning where it has a knob (codex via an advertised `model[tier]` id or a
+    confirmed `reasoning_effort` config option; cursor via the model id; cline via --thinking; junie via env).
+    `max` is accepted and clamped to the agent's ceiling (codex: xhigh). A reported no-op for an agent with
+    none. Omitted, the configured `default_effort` (per-agent or global) applies. `fallback` is an ordered
+    list of alternate targets
     (`cli` / `cli:model` strings or `{cli, model}` objects) tried when the primary fails on a
     re-execution-safe failure (a spawn/handshake failure that never ran the prompt); a benched alternate is
     skipped and `fallback_chain` records the path. A write/yolo delegation never falls back.
@@ -337,7 +339,8 @@ async def consensus(
     (`propose` / `write` / `yolo`) is refused -- there is no coherent merge of edits from several agents into
     one tree -- so route write / propose work through `delegate` (a single agent isolated in a worktree
     sandbox). `role` names a persona (see `list_roles`) prepended to the prompt every voice receives.
-    `effort` (low | medium | high | xhigh) asks every voice to spend more reasoning where it has a knob.
+    `effort` (low | medium | high | xhigh | max) asks every voice to spend more reasoning where it has a knob;
+    `max` is accepted and clamped to each agent's ceiling.
     `time_budget_s` is a wall-clock deadline for the WHOLE panel (distinct from each voice's `timeout_s`):
     at the deadline answered voices are kept, in-flight ones cut, and the panel aggregates over the harvest
     if `min_quorum` usable remain (`stop_reason="budget"`, with a `rollup`); below `min_quorum` is
@@ -425,7 +428,8 @@ async def debate(
     the voices run on persistent sessions in the working directory with no per-turn sandbox -- so route write /
     propose work through `delegate` (a single agent isolated in a worktree sandbox). `role` names a
     persona (see `list_roles`) prepended to the opening prompt every voice argues from. `effort` (low |
-    medium | high | xhigh) asks every voice to spend more reasoning where it has a knob. `timeout_s` applies
+    medium | high | xhigh | max) asks every voice to spend more reasoning where it has a knob; `max` is
+    accepted and clamped to each agent's ceiling. `timeout_s` applies
     to every voice's running prompt after acceptance; `pre_prompt_timeout_s` is separate and bounds each
     voice's sandbox prep when applicable, spawn, ACP initialize, session create/load, and model/effort
     selection — it ends before that voice's prompt acceptance; when omitted, it resolves through the
