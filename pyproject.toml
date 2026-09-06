@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rutherford-mcp-server"
-version = "3.1.0"
+version = "3.2.0"
 description = "An MCP server that orchestrates a crew of agentic coding agents over the Agent Client Protocol (ACP)."
 readme = "README.md"
 license = "MIT"
@@ -34,7 +34,26 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "fastmcp>=3.3",
+    # Bounded at the MAJOR, and the bound is the whole point. CI installs with `uv sync --locked`, but the
+    # lock is not shipped (see the sdist include list below) and the published install instructions invoke
+    # this package with no constraint of their own -- so what CI proves and what a user resolves are two
+    # different dependency sets, and only this string constrains the second one.
+    #
+    # Measured 2026-09-05: an unbounded `>=3.3` resolved a fresh install to fastmcp 4.0.3 / mcp 2.1.1 while
+    # the lock held 3.3.1 / 1.28.1. Every published release so far has therefore run on a dependency MAJOR
+    # its own CI never executed. It happens to work, with one observed regression: under 4.0.3 a tool error
+    # writes a rich-formatted, non-JSON line to stderr, which breaks the one-JSON-object-per-line contract
+    # `runtime/logging.py` maintains deliberately and that `_report_drops` goes out of its way to preserve.
+    #
+    # The forward risk is worse than that. `server.py` calls `mcp.run(transport=..., show_banner=...)` with
+    # keywords a major release is free to rename or drop; that failure lands at BOOT, on every `uvx` install,
+    # with a fully green build. The same reasoning already written below for the ACP SDK applies here without
+    # modification -- a framework can retire behaviour this server leans on without touching a signature --
+    # and this dependency had been the one left open.
+    #
+    # `<4` claims only the major that has actually been run. Raising it means running the release-resolve
+    # check (`scripts/check_server_boot.py --wheel`) against the new major, not editing this line.
+    "fastmcp>=3.3,<4",
     "pydantic>=2.13",
     "psutil>=7",
     "python-toon>=0.1.3",
@@ -60,6 +79,25 @@ dependencies = [
     # unreadable category narrows to untagged instead of comparing unequal, and every post-spawn step in
     # ACPSession.open runs inside one teardown guard so a read that raises cannot orphan the agent process.
     #
+    # 0.12.1 is validated and is a far larger release than its patch number suggests. It DELETED the pluggable
+    # dispatcher / queue / state-store layer outright (acp/task/dispatcher.py, queue.py and state.py are gone)
+    # and dropped four keyword arguments from Connection.__init__ along with them. None of that reaches here:
+    # nothing in this package names a removed symbol or passes a removed argument, because the SDK is driven
+    # through spawn_agent_process rather than assembled by hand.
+    #
+    # What was checked, and why each mattered:
+    #   * _deserialize.py is BYTE-IDENTICAL to 0.12.0, so the salvage-instead-of-reject behaviour described
+    #     above -- the actual hazard of this dependency -- is unchanged and the guards written for it still
+    #     apply. That single fact is most of the confidence here.
+    #   * Connection.close now rejects pending outgoing requests FIRST and moves the task shutdown into a
+    #     `finally`, which is strictly safer, and both it and MessageSender.close still latch on an
+    #     already-closed flag -- the property session.py's non-cancellable teardown stage depends on.
+    #   * schema.py is regenerated, not merely restyled: four response/error `id` fields became REQUIRED, the
+    #     content-block and configOption unions gained `type` / `kind` discriminators, and several open `str`
+    #     fields narrowed to Literal unions -- including SessionConfigOptionSelect.category, which the model
+    #     and effort channels read. The full suite and mypy strict both pass against it, so no narrowing bites
+    #     a path this client takes, but that is the surface to re-check next time.
+    #
     # Hence an exact pin rather than a range or a minor wildcard. Note which distinction is NOT doing the
     # work here: `<0.13` and `==0.12.*` both admit 0.12.z releases that do not exist yet, so neither one
     # protects against an unreleased patch -- `==0.12.*` merely also excludes falling back to 0.11. What
@@ -69,7 +107,7 @@ dependencies = [
     # release claimed here is the one actually put through the malformed-payload suite. Raise it
     # deliberately: re-read the deserialization behaviour, run tests/test_acp_wire.py against the new
     # release, then move the pin.
-    "agent-client-protocol==0.12.0",
+    "agent-client-protocol==0.12.1",
 ]
 
 [project.urls]

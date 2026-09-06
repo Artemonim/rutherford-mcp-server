@@ -27,7 +27,8 @@ uv run pytest -m integration  # local-only suite that drives real ACP agents
 
 A `justfile` wraps these. `just check` is the upstream pre-push gate: it runs `scripts/gate.py`, which executes
 every stage in order (lint, format-check, license-check, typecheck, tests, the per-file coverage floor,
-the entrypoint smoke check, and the build), streams their output, and stops at the first failure.
+the entrypoint smoke check, the live stdio server-boot check, and the build), streams their output, and
+stops at the first failure.
 `just test-integration` drives the real agents. Run a single test file with
 `uv run pytest tests/acp/test_session.py`.
 
@@ -41,7 +42,7 @@ head: <sha>
 dirty: false          # true means uncommitted edits were in the tree, so `head` alone does not describe what ran
 verdict: pass         # or fail
 failed_stage: null    # the stage name when verdict is fail
-stages[8,]{name,ok,seconds,exit_code}:
+stages[9,]{name,ok,seconds,exit_code}:
   lint,true,0.08,0
   ...
 ```
@@ -227,6 +228,7 @@ Project docs are root `*.md` and `docs/`. When you add a file under `docs/` or a
 
 - `scripts/check_license_headers.py` — SPDX header gate.
 - `scripts/check_per_file_coverage.py` — per-file coverage floor (80%).
+- `scripts/check_server_boot.py` — live stdio boot check (`serverInfo.version`, tools, JSON-RPC-only stdout).
 - `scripts/pre_commit_ci_guard.py` — freshness guard for `.ci_cache/report.json`.
 - `scripts/gate.py` — upstream `just check` runner and machine-readable verdict.
 

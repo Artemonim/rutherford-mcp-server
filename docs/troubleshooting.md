@@ -54,7 +54,7 @@ model.
 - For a local-model agent, confirm the model supports tool-calling — a model without it handshakes but
   fails the agentic turn. See [local-models.md](local-models.md).
 
-### `model_unavailable` in doctor — `claude_code` 400 invalid model on Bedrock / Amazon Toolbox
+### `model_unavailable` in doctor — `claude_code` 400 invalid model on Bedrock / enterprise wrappers
 
 The seat spawned and handshook (it shows `reachable` under `doctor connect_only`), but the turn failed
 because the provider rejected the model id:
@@ -63,8 +63,8 @@ because the provider rejected the model id:
 API Error (claude-opus-4-8): 400 The provided model identifier is invalid.
 ```
 
-This is a Claude Code configured for **AWS Bedrock** / **Google Vertex**, or an enterprise wrapper such
-as **Amazon's Toolbox** build, where the third-party `claude-agent-acp` adapter resolves the model down
+This is a Claude Code configured for **AWS Bedrock** / **Google Vertex**, or a **managed enterprise
+wrapper**, where the third-party `claude-agent-acp` adapter resolves the model down
 to a bare cloud alias (`claude-opus-4-8`) that the provider rejects — it needs an inference-profile id
 like `us.anthropic.claude-opus-4-1-20250805-v1:0`. The standalone `claude` CLI works because it resolves
 the Bedrock model itself; the SDK/adapter path that Rutherford drives does not. `doctor` attaches a
@@ -136,6 +136,30 @@ stages. Those stay under `pre_prompt_timeout_s` / `default_pre_prompt_timeout_s`
 
 If the call eventually fails, use the code-specific sections below (`ACP_PRE_PROMPT_TIMEOUT`,
 `ACP_TURN_TIMEOUT`, spawn/handshake failures) rather than inventing a client-side abort policy.
+
+### `codex` with both `model` and `effort` — bare vs bracketed model ids
+
+Codex has carried its reasoning effort two different ways, and which one a seat gets decides both the
+error you see when it goes wrong and the tier you actually get.
+
+Historically `codex-acp` advertised a catalog of `base[tier]` ids (`gpt-5.5[xhigh]`), so one selection
+set the model and the tier together. Newer Codex advertises **bare** ids plus a separate
+`reasoning_effort` config option. Rutherford therefore uses the bracket id **only when the agent
+advertises it**, and otherwise selects the advertised bare model and applies `reasoning_effort`,
+confirming the option's `current_value` before reporting the tier.
+
+What that means when reading a failure:
+
+- A bare model the agent does offer is never reported as `MODEL_UNAVAILABLE`. That code now means the
+  base id genuinely is not advertised on any channel.
+- If the fallback selects the bare model but the agent advertises no `reasoning_effort` option, or the
+  set is not confirmed, the turn fails `ACP_HANDSHAKE_FAILED` naming the **effort**, not the model. The
+  effort was requested and could not be proven applied, so it is refused rather than silently dropped.
+- A matching bare model id is never taken as evidence the bracket tier applied.
+
+The two channels also have different ceilings. A `base[tier]` id cannot encode `max`, so the rewrite
+clamps to `xhigh`; the `reasoning_effort` option is clamped to what the agent advertises, and current
+Codex lists `max` there. `effort_applied` always reports the tier that actually landed.
 
 ### `ACP_TURN_TIMEOUT` — the turn exceeded its limit
 
@@ -295,7 +319,7 @@ reported as a `ConfigError`, not a raw decode error.
 | `ACP_HANDSHAKE_FAILED` | Confirm the ACP launch command; raise `handshake_timeout_s`; check the agent's auth. On Codex with `model` + `effort`, this can mean the bare model was advertised but `reasoning_effort` was not confirmed (Codex ACP 1.8); it is not `MODEL_UNAVAILABLE`. |
 | `ACP_PRE_PROMPT_TIMEOUT` | Raise `pre_prompt_timeout_s` / `default_pre_prompt_timeout_s`; check sandbox prep or a slow cold start. |
 | `ACP_REFUSED` / `ACP_EMPTY_ANSWER` | The agent answered nothing; check auth, or a local model's tool-calling support. |
-| `model_unavailable` (doctor) | The provider rejected the model id; on Bedrock/Vertex/Toolbox pin one via `[agents.claude_code.env]` — see [bedrock.md](bedrock.md). |
+| `model_unavailable` (doctor) | The provider rejected the model id; on Bedrock/Vertex/an enterprise wrapper pin one via `[agents.claude_code.env]` — see [bedrock.md](bedrock.md). |
 | `ACP_TURN_TIMEOUT` | Raise `timeout_s` or `default_timeout_s`; use `mode="async"` for long tasks. |
 | Quiet sync / no MCP progress | Expected for `mode="sync"` through pre-prompt (`pre_prompt_timeout_s`) then the running prompt (`timeout_s`); do not invent a shorter cancel. Choose `mode="async"` before start for visibility and cancellation. |
 | `ACP_TURN_ERROR` | A transport/protocol error mid-turn; re-run, and check `doctor`. |

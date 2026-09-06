@@ -58,7 +58,9 @@ command  = ["my-agent", "--acp"]
 provider = "openai"        # optional: the fixed model vendor, recorded as provenance
 default_model = "gpt-5"    # optional: the model used when a call names none
 handshake_timeout_s = 30   # optional: raise it for a heavyweight agent
-env = { MY_AGENT_TOKEN = "..." }   # optional: env set for the subprocess
+env = { MY_AGENT_REGION = "us-west-2" }   # optional: env set for the subprocess. Non-secret values
+                                          # only -- this file is plain text and Rutherford copies it
+                                          # verbatim; leave credentials to the agent's own store.
 ```
 
 The id (`my-agent`) is the name you delegate to: `delegate(cli="my-agent", ...)`, or use it in
@@ -80,7 +82,7 @@ automatically. Only the launch `command` and `env` are imported.
     "my-agent": {
       "command": "my-agent",
       "args": ["--acp"],
-      "env": { "MY_AGENT_TOKEN": "..." }
+      "env": { "MY_AGENT_REGION": "us-west-2" }
     }
   }
 }
@@ -134,7 +136,10 @@ npm-shim resolution, a per-agent handshake budget, a fixed provider. To add one,
 `AgentDescriptor` to `HIGH_FIDELITY` in `src/rutherford/acp/descriptors.py`:
 
 ```python
-AgentDescriptor("my-agent", "My Agent", ("my-agent", "--acp"), provider="openai"),
+HIGH_FIDELITY = (
+    # ... the existing descriptors ...
+    AgentDescriptor("my-agent", "My Agent", ("my-agent", "--acp"), provider="openai"),
+)
 ```
 
 The fields are documented in [architecture.md](architecture.md#the-agent-descriptor-and-registry).
@@ -151,5 +156,6 @@ The merge bar for a new built-in:
 - The unit suite stays green using the fake ACP agent in `tests/fake_acp_agent.py` — no new test
   requires a real subprocess.
 
-If an agent only drives with config (a non-default launch, an env token), it belongs in config or an
-`acp.json`, not in the built-in roster.
+If an agent only drives with extra configuration (a non-default launch command, an extra environment
+setting), it belongs in config or an `acp.json`, not in the built-in roster. Credentials are not part
+of that: leave those to the agent's own credential store or your environment, never a config file.

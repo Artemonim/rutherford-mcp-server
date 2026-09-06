@@ -16,6 +16,8 @@ import contextlib
 import logging
 import sys
 from collections.abc import Awaitable
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +54,27 @@ from .tools.review import review_tool
 from .tools.roles import list_roles_tool
 from .tools.setup import setup_tool
 
+
+def _package_version() -> str:
+    """This distribution's version, for the ``serverInfo.version`` an MCP client is shown.
+
+    Falls back to ``"0.0.0"`` when the package metadata is absent, which happens when the module is run
+    straight from a source tree that was never installed. A server that starts and reports an obviously
+    unreal version is better than one that refuses to start over its own label.
+    """
+    try:
+        return _dist_version("rutherford-mcp-server")
+    except PackageNotFoundError:  # pragma: no cover - an uninstalled source checkout
+        return "0.0.0"
+
+
 mcp: FastMCP = FastMCP(
     "rutherford",
+    # Reported to the client at `initialize` as serverInfo.version. Read from package metadata rather than
+    # written here, because FastMCP defaults this to ITS OWN version when it is omitted: an MCP client
+    # connecting to 3.2.0 was shown "3.3.1", a string matching no Rutherford release, which moved whenever
+    # FastMCP updated and read as NEWER than the release it was describing.
+    version=_package_version(),
     instructions=(
         "Rutherford orchestrates other agentic coding agents over the Agent Client Protocol (ACP). Use "
         "`delegate` to hand a task to one agent and `capabilities` to see which agents are available. "
@@ -182,7 +203,7 @@ async def delegate(
     `list_roles`) whose system prompt is prepended to `prompt`. `effort` (low | medium | high | xhigh | max)
     asks the agent to spend more reasoning where it has a knob (codex via an advertised `model[tier]` id or a
     confirmed `reasoning_effort` config option; cursor via the model id; cline via --thinking; junie via env).
-    `max` is accepted and clamped to the agent's ceiling (codex: xhigh). A reported no-op for an agent with
+    `max` is accepted and clamped to the agent's ceiling where it has one. A reported no-op for an agent with
     none. Omitted, the configured `default_effort` (per-agent or global) applies. `fallback` is an ordered
     list of alternate targets
     (`cli` / `cli:model` strings or `{cli, model}` objects) tried when the primary fails on a

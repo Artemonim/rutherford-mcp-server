@@ -88,6 +88,22 @@ def test_kiro_uses_the_effort_launch_flag_for_every_tier() -> None:
         assert not override.via_config_option and override.extra_env == () and override.model is None
 
 
+def test_clamp_to_supported_keeps_max_when_the_option_advertises_it() -> None:
+    """The config-option ceiling is the AGENT's advertised list, not a constant for the agent.
+
+    Codex's ``reasoning_effort`` option advertises ``low|medium|high|xhigh|max`` (verified live), so a codex
+    seat that resolves to that channel applies ``max`` as ``max``. Only the legacy ``base[tier]`` model-id
+    rewrite is bounded at ``xhigh``, because that catalog had no ``max`` id to select. Pinning it here so the
+    two ceilings cannot be conflated back into one claim.
+    """
+    with_max = [Effort.LOW, Effort.MEDIUM, Effort.HIGH, Effort.XHIGH, Effort.MAX]
+    assert clamp_to_supported(Effort.MAX, with_max) is Effort.MAX
+    assert clamp_to_supported(Effort.XHIGH, with_max) is Effort.XHIGH
+    # ...and the bracket rewrite, on the same request, still cannot go above xhigh.
+    bracket = effort_overrides(_descriptor("codex"), Effort.MAX, model="gpt-5.5")
+    assert bracket.applied is Effort.XHIGH
+
+
 def test_clamp_to_supported_picks_the_request_or_the_nearest_below() -> None:
     codex = [Effort.LOW, Effort.MEDIUM, Effort.HIGH, Effort.XHIGH]
     assert clamp_to_supported(Effort.HIGH, codex) is Effort.HIGH  # offered -> exact
@@ -419,8 +435,38 @@ async def test_codex_effort_does_not_treat_bare_id_as_applied_effort(monkeypatch
     assert result.error is not None
     assert result.error.code is ErrorCode.ACP_HANDSHAKE_FAILED
     assert "effort" in result.error.message
-    assert "gpt-5.6-terra" in result.error.message or "not advertised" in result.error.message
+    # The requested tier must be named. NOT an "or 'not advertised'" clause: that substring is
+    # unconditional in this detail, so the assertion would hold against a message that dropped
+    # everything specific -- a test that passes for the wrong reason.
+    assert "'max'" in result.error.message
     assert result.effort_applied is None
+
+
+async def test_codex_effort_never_falls_back_to_a_bracketed_caller_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller id that already carries a tier is not a bare-model candidate.
+
+    The adversarial case: the caller pins ``gpt-5.5[low]`` and asks for ``high``. The rewrite is
+    ``gpt-5.5[high]``, which this catalog does NOT advertise -- but ``gpt-5.5[low]`` IS advertised, and so is
+    ``reasoning_effort``. Selecting the caller's id would put ``low`` in the model id and ``high`` in the
+    option at the same time, and the agent may honour the id, so reporting ``effort_applied=high`` would be
+    an attestation Rutherford cannot support.
+
+    The bare base must win instead, carrying the tier on the option alone where it can be confirmed.
+    """
+    monkeypatch.setenv("RUTHERFORD_FAKE_MODELS", "gpt-5.5,gpt-5.5[low]")
+    monkeypatch.setenv("RUTHERFORD_FAKE_EFFORT_OPTION", "reasoning_effort:low,medium,high,xhigh")
+    service = _delegation(RutherfordConfig(), _descriptor("codex"))
+    request = DelegationRequest(
+        target=Target(cli="codex", model="gpt-5.5[low]"),
+        prompt="EFFORT?",
+        working_dir=str(REPO_ROOT),
+        effort=Effort.HIGH,
+    )
+    result = await service.delegate(request)
+
+    assert result.ok is True, f"codex fake failed: {result.error}"
+    assert result.target.model == "gpt-5.5", "a bracketed caller id must not be selected as the bare fallback"
+    assert result.effort_applied is Effort.HIGH
 
 
 async def test_codex_effort_unadvertised_base_is_still_model_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

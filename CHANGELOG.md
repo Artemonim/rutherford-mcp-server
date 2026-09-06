@@ -40,6 +40,19 @@ All notable changes to this project are documented in this file. The format is b
   stay local operator observability. Reflected in troubleshooting, recipes, MCP client integration,
   README jobs notes, and related security checklist / config log wording.
 
+### Changed
+
+- **Clarified and regression-tested Cursor launch-argv model routing** — troubleshooting documents that
+  `confirmed: false` (and `routing_channel=launch_argv` / `model_confirmation=intent_only`) is the
+  correct Cursor success state, not a signal to call `session/set_model`. Opt-in integration modules
+  lock family routing and `session/load` resume behaviour. Launch-argv routing itself already worked;
+  this does not claim a routing fix. Cursor `pre_prompt_timeout_s = 300` recipe remains the sandbox
+  budget guidance (global default stays 90s).
+
+## [3.2.0] - 2026-09-05
+
+### Added
+
 - **`direct_workspace_mutation` on `delegate`, behind an operator opt-in** — a `write` / `yolo` agent can
   edit `working_dir` itself, with live terminal access there, instead of the isolated worktree. This is for
   work whose product is the effect on the tree rather than a diff: installing dependencies, running local
@@ -72,12 +85,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- **Clarified and regression-tested Cursor launch-argv model routing** — troubleshooting documents that
-  `confirmed: false` (and `routing_channel=launch_argv` / `model_confirmation=intent_only`) is the
-  correct Cursor success state, not a signal to call `session/set_model`. Opt-in integration modules
-  lock family routing and `session/load` resume behaviour. Launch-argv routing itself already worked;
-  this does not claim a routing fix. Cursor `pre_prompt_timeout_s = 300` recipe remains the sandbox
-  budget guidance (global default stays 90s).
+- **FastMCP is bounded at the major, and the dependency set users actually resolve is now tested.** The
+  pin was `fastmcp>=3.3` with no ceiling. CI installs with `uv sync --locked`, but the lock is not shipped
+  and the published install instructions carry no constraint, so a fresh `uvx rutherford-mcp-server`
+  resolved fastmcp 4.0.3 while the lock held 3.3.1 — every release so far ran on a dependency **major its
+  own CI never executed**. It worked, with one observed regression: under 4.0.3 a tool error writes a
+  rich-formatted, non-JSON line to stderr, breaking the one-JSON-object-per-line contract the structured
+  logger maintains deliberately. The forward risk is larger, because the server calls
+  `mcp.run(transport=…, show_banner=…)` with keywords a major is free to rename — a failure that lands at
+  boot, on every install, with a green build.
+
+  The bound claims only the major that has been run, and the lock now matches what a fresh resolve picks,
+  so the two are no longer describing different software. A new CI job resolves unlocked and boots the
+  built wheel over stdio, which is the only check here that exercises what ships.
+
+- **The ACP SDK pin moves to 0.12.1, and Dependabot now tracks it through the `uv` ecosystem.** The
+  release is a much larger change than its patch number suggests: it deletes the pluggable dispatcher,
+  queue and state-store layer outright and drops four keyword arguments from `Connection.__init__`.
+  None of that reaches this package, which drives the SDK through `spawn_agent_process` rather than
+  assembling a connection by hand, so no removed symbol is named here.
+
+  What made the bump acceptable is that `_deserialize.py` is byte-identical to 0.12.0 — the
+  salvage-instead-of-reject behaviour that is the real hazard of this dependency, and the reason the pin
+  exists, is unchanged, so the guards written against it still hold. `Connection.close` also got safer:
+  it rejects pending requests first and moves the task shutdown into a `finally`, while still latching on
+  an already-closed flag, which is the property the non-cancellable teardown stage depends on. The
+  regenerated schema is the part to watch next time — four `id` fields became required, the content-block
+  and config-option unions gained discriminators, and several open `str` fields narrowed to `Literal`
+  unions, including the config-option category that the model and effort channels read.
+
+  The Dependabot ecosystem changes from `pip` to `uv` because the `pip` ecosystem updates the manifest
+  without regenerating `uv.lock`, and CI installs with `--locked`. Every dependency PR therefore failed
+  all nine matrix cells on a stale lockfile rather than on anything about the dependency.
 
 - **The ACP SDK is now pinned to 0.12, and read as an untrusted source rather than a validating one.** The
   0.11 pin was raised after checking what actually changed: the protocol version is unchanged, both model
@@ -98,12 +137,77 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **An agent's launch path now resolves to its real on-disk filename case.** `shutil.which` never reads the
+  directory entry: it returns the caller's own spelling joined to the directory, plus — on Windows — each
+  `PATHEXT` entry appended verbatim. An uppercase `PATHEXT` therefore names `kiro-cli.EXE` for a file whose
+  dirent is `kiro-cli.exe`. Windows opens either spelling, so the process starts and nothing looks wrong;
+  but a launcher shim that looks its own `argv[0]` basename up in a case-sensitive table finds no entry,
+  prints one line, and exits before reading a byte of stdin. Every seat behind such a shim failed in under
+  0.15s, and `connect_only` failed identically, because the death is at spawn and never reaches `initialize`.
+
+  The normalization runs on every platform rather than under a Windows guard. The `PATHEXT` mechanism is
+  Windows-only but the defect is not: macOS ships a case-insensitive filesystem by default, where `which`
+  likewise returns the caller's spelling for a differently-spelled dirent and `execve` passes it through
+  unchanged. On a case-sensitive filesystem the exact-match branch returns the input untouched, so it is
+  self-neutralizing there. It deliberately does not use `Path.resolve()` / `realpath`, which would also
+  follow links and pin a version-managed `node` shim to one concrete install directory, and it cannot use an
+  `exists()` probe, which is case-insensitive on exactly the platforms carrying the bug. Where two entries
+  differ only in case and neither matches exactly, the input is returned rather than guessing at a different
+  binary. The same normalization is applied to the `node` fallback inside npm-shim resolution, which was a
+  second `which` call with the same exposure.
+
+- **An agent's stderr is captured and a bounded excerpt included in handshake failure details.** It was previously
+  discarded, so a child that explained itself precisely and died surfaced only as "Connection lost" — a
+  description of the socket, not of the cause — and diagnosing one meant reproducing it by hand outside
+  Rutherford. The pipe is owned by Rutherford and drained continuously from spawn to EOF, which is what makes
+  it safe: inheriting the host's stderr is what once let an undrained pipe wedge the MCP host, and discarding
+  it was the previous fix. Retention is head-bounded, because the failure this exists to explain prints its
+  one useful line first, and draining continues past the cap so the child can never block on a write. The
+  text is agent-authored, so it is stripped of ANSI/OSC escape sequences and control characters — which can
+  retitle a terminal, forge a hyperlink, or write the clipboard — then masked for credential shapes, then
+  capped by line and byte count and fenced, so where Rutherford's own words stop is unambiguous. It is
+  attached only where a process actually existed; `ACP_SPAWN_FAILED` means the spawn itself failed, so there
+  is no child and never a tail.
+
+  The masking exists because the subprocess inherits a credential-bearing environment, so an agent that
+  prints a token on the way out would otherwise put it in a result the caller reads and a durable job keeps.
+  Stripping runs before masking, so a sequence spliced into a token cannot evade it. It matches known shapes
+  and is not a guarantee — an unrecognized credential format survives it — and it is deliberately
+  conservative, because an entropy heuristic would eat the hashes, paths, and model ids that make the
+  diagnostic worth having. `docs/security.md` now describes this path rather than implying it cannot exist.
+  Covered shapes include credentials embedded in a URL (`https://user:pass@host`) — in practice the likeliest
+  way one reaches stderr at all, since git, npm, pip and curl all echo the URL back on an auth failure, and
+  there only the password is dropped, because which host rejected the login is the diagnostic. Armored
+  private-key blocks are covered too, across PEM (including the encrypted traditional format, whose
+  `Proc-Type` and `DEK-Info` headers a base64-only matcher misses), PGP, and RFC 4716 SSH2 armor.
+
+- **The server reported FastMCP's version as its own.** `serverInfo.version`, which every MCP client reads
+  at `initialize`, was filled by FastMCP with its own version because the argument was omitted: a client
+  connecting to 3.2.0 was shown `3.3.1` — a string matching no release of this package, that moved whenever
+  FastMCP updated, and that read as newer than the release it was describing. It now reports the
+  distribution version.
+
+- **The entrypoint check could not detect a server that fails to boot.** `--smoke` builds the app and
+  returns before `mcp.run`, so the gate stage named for the entrypoint proved config loading and registry
+  construction and nothing about the transport. A new `server-boot` stage starts the stdio server for real
+  and asserts what only a live exchange can: that `serverInfo.version` on the wire is this distribution's,
+  that every tool registers and a real call returns a non-error result, and that nothing but JSON-RPC
+  reaches stdout — a stray write there corrupts the protocol for every client. The child runs unbuffered,
+  because a piped stdout is block-buffered and a stray write would otherwise sit in it unseen, and both
+  streams are read on threads so a server that boots and then says nothing fails on a deadline instead of
+  hanging.
+
+- **A handshake that timed out reported an empty reason.** `asyncio.TimeoutError` stringifies to nothing, so
+  the detail read "ACP handshake with <agent> failed: " and stopped. It now names the fault type, keeping a
+  timeout distinguishable from a closed pipe.
 - **Codex `model` + `effort` no longer fails as `MODEL_UNAVAILABLE` on Codex ACP 1.8.** Codex 1.8
   advertises bare model ids (e.g. `gpt-5.6-terra`), not `base[xhigh]`. Rutherford was rewriting
   `effort=max` into `gpt-5.6-terra[xhigh]` before advertisement checks, then rejecting a model the
   agent actually offered. The bracket id is used only when advertised; otherwise the advertised bare
-  model is selected and `reasoning_effort` is applied with `current_value` confirmation (`max` still
-  clamps to `xhigh`). A matching base id is never treated as proof the bracket effort applied: missing
+  model is selected and `reasoning_effort` is applied with `current_value` confirmation. The two channels
+  have different ceilings: a `base[tier]` id cannot encode `max`, but the config option is clamped to what
+  the agent advertises and current codex lists `max` there, so the fallback applies a tier the bracket path
+  could not. A matching base id is never treated as proof the bracket effort applied: missing
   `reasoning_effort` after that fallback is `ACP_HANDSHAKE_FAILED` naming the effort. MCP tool
   descriptions now list `max` alongside `low|medium|high|xhigh`.
 
@@ -214,10 +318,51 @@ All notable changes to this project are documented in this file. The format is b
   A snapshot that lands after its deadline is reaped rather than dropped, and a timeout, a failure, an
   undispatched reap, or a backlog of cleanups that are not completing is logged rather than passing for
   an empty tree.
-- **Agent stderr is detached from the host pipe, and structured logs go through a non-blocking writer.**
+- **Structured logs go through a non-blocking writer.**
   The writer's queue is bounded; when a wedged sink causes it to overflow, the dropped count is reported
   as a `log_records_dropped` record rather than vanishing — the gap is visible in the same JSON stream,
   anchored before the next record.
+
+- **A bracket inside a multi-line TOML string is no longer read as array structure.** The config bracket
+  scanner carries multi-line string state across lines now, in both the strip and the insert paths, and
+  honors backslash-escaped delimiters. Without it a line beginning `[` inside such a string read as a table
+  header.
+
+- **An unreadable agent-registry cache is a cache miss rather than a traceback.**
+
+### Security
+
+- **The trusted-workspace allowlist can no longer fail open under an interleaved edit.** The
+  read-modify-write on the global config is serialized by a lock file now, held across the read as well as
+  the write. A `trust` racing an `untrust` could otherwise put back an entry the user had just revoked —
+  an allowlist that fails open, which is the one direction this gate must never fail. There is deliberately
+  no automatic stale-lock breaking: age proves the holder is slow, not that it is gone, and breaking on it
+  lets two waiters both believe they hold the lock. A leftover lock times out with a message naming the file
+  to delete, and release verifies the lock is still ours before unlinking it.
+
+- **The allowlist editor is unreachable from model-callable code by construction.** The read-only breadth
+  check moved to `config/workspace.py`, so no tool has any reason to import `config.trust` at all, and an
+  AST check enforces that as a total ban rather than a name grep — which had missed both an alias and
+  `from ..config import trust`. A runtime namespace check backs it up against a dynamic import.
+
+- **Trusting a very broad path now says so.** The gate is a prefix match, so trusting a directory trusts
+  everything beneath it; trusting a filesystem root, a home directory, or the parent of all homes warns.
+  It warns rather than refuses, because the CLI is an explicit human act and a checkout really can live at
+  `/opt`. The warning also rides the `setup` tool's result, since that path is model-callable and has no
+  terminal to print to.
+
+- **Every GitHub Action is pinned to an immutable commit SHA.** The workflows referenced floating tags
+  (`actions/checkout@v7`), which a tag move can repoint at new code without any change here. They now
+  name a SHA with the human-readable ref beside it. This matters most on the release workflow, which
+  holds `id-token: write` for PyPI trusted publishing and `contents: write` to create the release: a
+  compromised action there would run inside a job able to publish.
+
+- **The stdio transport is pinned rather than inherited.** FastMCP resolves an omitted transport through a
+  pydantic-settings field with an `FASTMCP_` env prefix and `.env` support, so `FASTMCP_TRANSPORT=http` in
+  the environment would have started a Starlette HTTP server with no code change. Rutherford is an ACP
+  orchestrator spoken to over stdio by an MCP client; that HTTP stack arrives only as a transitive
+  dependency and is neither used nor tested here. Naming the transport makes stdio an invariant instead of
+  a default, which is what keeps the stack unreachable.
 
 [#21]: https://github.com/chapmanjw/rutherford-mcp-server/pull/21
 [#22]: https://github.com/chapmanjw/rutherford-mcp-server/pull/22

@@ -59,7 +59,7 @@ order the fields appear in `config/schema.py`.
 | `default_safety_mode` | `string` | `"read_only"` | Safety posture when a call omits `safety_mode`. One of `read_only`, `propose`, `write`, `yolo`. |
 | `default_timeout_s` | `float` | `300.0` | Per-run prompt timeout in seconds (> 0). Governs only a running `session/prompt`. |
 | `default_pre_prompt_timeout_s` | `float` | `90.0` | Hard deadline for pre-prompt work (> 0): sandbox prep, ACP spawn, initialize, session create/load, and model/effort selection. Ends before the prompt is accepted. Semaphore queue wait does not consume this budget. Distinct from `default_timeout_s`. |
-| `default_effort` | `string` or omitted | none | Default reasoning-effort tier when a call names none (`low` / `medium` / `high` / `xhigh` / `max`); `None` lets the agent decide. Agents clamp `max` to their own ceiling (codex: `xhigh`). |
+| `default_effort` | `string` or omitted | none | Default reasoning-effort tier when a call names none (`low` / `medium` / `high` / `xhigh` / `max`); `None` lets the agent decide. An agent clamps `max` to whatever its own channel advertises, reported as `effort_applied` -- on codex that is `max` through the `reasoning_effort` option and `xhigh` through the legacy `base[tier]` model id. |
 | `default_time_budget_s` | `float` or omitted | none | Default wall-clock budget for a panel / job; `None` means no budget (runs to completion). |
 | `default_on_budget` | `string` | `"harvest"` | Disposition at a time-budget deadline when a call names none. |
 | `role_dirs` | `list[str]` | `[]` | Extra directories to search for role markdown files. Built-in roles always load. Resolved to absolute paths; a missing directory warns, it does not fail. |
@@ -267,7 +267,7 @@ reuse the session. `codex` (`codex-acp`) and `claude_code` (`claude-agent-acp`) 
 Codex and Claude Code CLI logins over ACP and need no API key. Confirm what actually drives on this
 machine with `doctor`.
 
-**On AWS Bedrock / Google Vertex (or an enterprise wrapper such as Amazon Toolbox)** a `claude_code`
+**On AWS Bedrock / Google Vertex (or a managed enterprise wrapper)** a `claude_code`
 turn can fail with `400 The provided model identifier is invalid` even though `doctor connect_only`
 reports the seat reachable. The fix is a per-agent `[agents.claude_code.env]` block pinning a valid
 provider model id — see **[Claude Code on Bedrock / enterprise wrappers](bedrock.md)** for the full

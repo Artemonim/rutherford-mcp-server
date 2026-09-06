@@ -291,12 +291,60 @@ existing CLI login, with no API key. Other agents use whatever auth their own lo
 
 ## Secrets handling
 
-Rutherford does not handle a credential value. The agent subprocess inherits the environment so its
-own credential discovery works; Rutherford layers only the descriptor's `env_overrides` on top (a
-local-runtime provider env, never a credential it minted). A credential value never appears in a
-`DelegationResult`, which carries text, cost, provenance, and error info only. Keep API keys and
-session tokens in environment variables or each agent's own credential store. Do not put them in a
-config file, a role file, or anywhere else in the repository.
+Rutherford never obtains or mints a credential of its own. Credentials reach an agent by two routes,
+and it is worth being exact about which is which.
+
+The first is inheritance, and it is the main one: the subprocess inherits Rutherford's environment, so
+the agent's own credential discovery works the way it would if you had launched it yourself. Rutherford
+neither reads nor filters what is in there.
+
+The second is the only place Rutherford ADDS anything, and it adds it verbatim without recognising
+what it is: an `[agents.<id>.env]` block is copied straight into the child's environment. The intended
+use is a non-secret pin such as a provider model id. Keep API keys and session tokens in your
+environment or the agent's own credential store, and out of a config file, a role file, or anywhere
+else in the repository -- a value placed there is one Rutherford will copy, and one that sits in plain
+text wherever that file lives.
+
+Both of those describe the way IN. Neither is a guarantee about what comes back OUT: a result can
+carry a credential by a separate route, described below, which belongs to the agent rather than to
+Rutherford. Do not quote either half without the other.
+
+Such a result can also come to rest on disk. A persisted run (`persist=true`, or a `job` default)
+writes its output under the job's `artifacts/` directory -- a delegation's `answer.md`, a consensus's
+`voices/voice-N.md`, a debate's `transcript.md`. An agent's ANSWER is written there verbatim: the
+masking described below runs only on stderr captured from a failed session open, never on the text of
+a successful turn. If an agent quotes a credential back at you, that is what lands on disk. Treat the
+jobs directory with the same care as any other diagnostic output.
+
+When a session fails to open, a bounded excerpt of the agent's own stderr is attached to the failure
+detail -- the FIRST bytes it wrote, not the last, because a launcher that rejects its arguments
+explains itself immediately, then exits, and says it nowhere else. The subprocess inherits a
+credential-bearing environment, so a misconfigured adapter, proxy, or SDK that prints a token on the
+way out would put that token in front of Rutherford.
+
+Captured stderr is therefore masked for known credential shapes before it is surfaced — authorization
+headers, `*_KEY` / `*_TOKEN` / `*_SECRET` assignments, vendor-prefixed keys (`sk-`, `ghp_`, `AKIA`,
+`xox*`, `AIza`, `glpat-`), JWTs, presigned-URL signature parameters, armored private-key blocks
+(PEM including encrypted traditional-format keys, PGP, and RFC 4716 SSH2), and credentials embedded
+in a URL (`https://user:pass@host`) — and the masking runs after escape
+stripping, so a sequence spliced into a token cannot evade it.
+
+The key masking is marker-based, so it reaches armored blocks only. A non-armored private key —
+a PuTTY `.ppk`, raw DER bytes, or key material printed with no markers at all — has no shape to
+match on and is not covered. Read the list above as what it says rather than as "all private keys".
+
+That last shape is worth calling out, because it is the likeliest of these to occur in practice: git,
+npm, pip and curl all echo a URL back on an auth failure, so an agent that shells out to git prints
+one directly. The host and user survive the masking; only the password is dropped, because which host
+rejected the login is the diagnostic.
+
+Treat that as a mitigation, not a guarantee. It matches shapes, so an unrecognized credential format
+survives it; the pass is deliberately conservative because an entropy heuristic would redact the
+hashes, paths, and model ids that make the diagnostic worth having. The durable controls are that the
+capture is head-bounded and byte-capped, that it appears only on a failed session open and never on a
+successful turn, and that it is diagnostic output rather than a log sink. An operator who cannot
+accept a residual disclosure risk in error details should not run an agent whose environment carries
+credentials it is willing to print.
 
 ---
 
